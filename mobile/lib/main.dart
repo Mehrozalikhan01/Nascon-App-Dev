@@ -198,8 +198,8 @@ class _LoginScreenState extends State<LoginScreen> {
       if (mounted) setState(() => _error = e.message);
     } on TimeoutException {
       if (mounted) setState(() => _error = "The server did not answer in time. Check the server address and try again.");
-    } catch (_) {
-      if (mounted) setState(() => _error = "Could not reach the server at ${ApiService.baseUrl}. Check server address or start the Docker container.");
+    } catch (e) {
+      if (mounted) setState(() => _error = "Sign in failed: $e (Server: ${ApiService.baseUrl})");
     } finally {
       if (mounted) setState(() => _busy = false);
     }

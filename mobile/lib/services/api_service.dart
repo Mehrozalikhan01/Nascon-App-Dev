@@ -19,23 +19,29 @@ class ApiService {
 
   static Future<String?> _readLocalValue(SharedPreferences prefs, String key) async {
     if (_usesAndroidStorage) {
-      return _localChannel.invokeMethod<String>('get', {"key": key});
+      try {
+        return await _localChannel.invokeMethod<String>('get', {"key": key});
+      } catch (_) {}
     }
     return prefs.getString(key);
   }
 
   static Future<void> _writeLocalValue(SharedPreferences prefs, String key, String value) async {
     if (_usesAndroidStorage) {
-      await _localChannel.invokeMethod<void>('set', {"key": key, "value": value});
-      return;
+      try {
+        await _localChannel.invokeMethod<void>('set', {"key": key, "value": value});
+        return;
+      } catch (_) {}
     }
     await prefs.setString(key, value);
   }
 
   static Future<void> _removeLocalValue(SharedPreferences prefs, String key) async {
     if (_usesAndroidStorage) {
-      await _localChannel.invokeMethod<void>('remove', {"key": key});
-      return;
+      try {
+        await _localChannel.invokeMethod<void>('remove', {"key": key});
+        return;
+      } catch (_) {}
     }
     await prefs.remove(key);
   }
@@ -117,8 +123,12 @@ class ApiService {
     currentEmail = email;
     final prefs = await SharedPreferences.getInstance();
     if (_usesAndroidStorage) {
-      await _secureChannel.invokeMethod<void>('writeToken', {"token": token});
-      await prefs.remove("auth_token");
+      try {
+        await _secureChannel.invokeMethod<void>('writeToken', {"token": token});
+        await prefs.remove("auth_token");
+      } catch (_) {
+        await prefs.setString("auth_token", token);
+      }
     } else {
       await prefs.setString("auth_token", token);
     }
@@ -132,8 +142,12 @@ class ApiService {
     currentEmail = "";
     final prefs = await SharedPreferences.getInstance();
     if (_usesAndroidStorage) {
-      await _secureChannel.invokeMethod<void>('deleteToken');
-      await prefs.remove("auth_token");
+      try {
+        await _secureChannel.invokeMethod<void>('deleteToken');
+        await prefs.remove("auth_token");
+      } catch (_) {
+        await prefs.remove("auth_token");
+      }
     } else {
       await prefs.remove("auth_token");
     }
