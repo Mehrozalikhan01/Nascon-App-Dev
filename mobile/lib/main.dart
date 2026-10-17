@@ -1680,12 +1680,13 @@ class _StoreScreenState extends State<StoreScreen> {
                   onChanged: (_) => setState(() {})),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
+                  isExpanded: true,
                   initialValue: _paymentToken,
                   decoration: const InputDecoration(labelText: "Demo payment", prefixIcon: Icon(Icons.credit_card_outlined)),
                   items: const [
-                    DropdownMenuItem(value: "tok_success", child: Text("Test payment · success")),
-                    DropdownMenuItem(value: "tok_declined", child: Text("Test payment · declined")),
-                    DropdownMenuItem(value: "tok_capture_fail", child: Text("Test payment · capture failure")),
+                    DropdownMenuItem(value: "tok_success", child: Text("Test payment · success", overflow: TextOverflow.ellipsis)),
+                    DropdownMenuItem(value: "tok_declined", child: Text("Test payment · declined", overflow: TextOverflow.ellipsis)),
+                    DropdownMenuItem(value: "tok_capture_fail", child: Text("Test payment · capture failure", overflow: TextOverflow.ellipsis)),
                   ],
                   onChanged: _checkoutDraft != null ? null : (value) { if (value != null) setState(() => _paymentToken = value); },
                 ),
@@ -1841,32 +1842,35 @@ class _RosterManagementScreenState extends State<RosterManagementScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             DropdownButtonFormField<String>(
+              isExpanded: true,
               initialValue: _selectedPlayer,
               decoration: const InputDecoration(labelText: "Player", border: OutlineInputBorder()),
               items: const [
-                DropdownMenuItem(value: "player-alpha-1", child: Text("Ali Raza · Goalkeeper")),
-                DropdownMenuItem(value: "player-alpha-3", child: Text("Bilal Ahmed · Defender")),
+                DropdownMenuItem(value: "player-alpha-1", child: Text("Ali Raza · Goalkeeper", overflow: TextOverflow.ellipsis)),
+                DropdownMenuItem(value: "player-alpha-3", child: Text("Bilal Ahmed · Defender", overflow: TextOverflow.ellipsis)),
               ],
               onChanged: (v) => setState(() => _selectedPlayer = v!),
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
+              isExpanded: true,
               initialValue: _actionType,
               decoration: const InputDecoration(labelText: "Action Type", border: OutlineInputBorder()),
               items: const [
-                DropdownMenuItem(value: "transfer", child: Text("Permanent Transfer")),
-                DropdownMenuItem(value: "loan", child: Text("Loan with Auto-Return")),
-                DropdownMenuItem(value: "release", child: Text("Release Player")),
+                DropdownMenuItem(value: "transfer", child: Text("Permanent Transfer", overflow: TextOverflow.ellipsis)),
+                DropdownMenuItem(value: "loan", child: Text("Loan with Auto-Return", overflow: TextOverflow.ellipsis)),
+                DropdownMenuItem(value: "release", child: Text("Release Player", overflow: TextOverflow.ellipsis)),
               ],
               onChanged: (v) => setState(() => _actionType = v!),
             ),
             const SizedBox(height: 12),
             if (_actionType != "release")
               DropdownButtonFormField<String>(
+                isExpanded: true,
                 initialValue: _toSquad,
                 decoration: const InputDecoration(labelText: "Destination Squad", border: OutlineInputBorder()),
                 items: const [
-                  DropdownMenuItem(value: "club-alpha-2", child: Text("Club Alpha 2")),
+                  DropdownMenuItem(value: "club-alpha-2", child: Text("Club Alpha 2", overflow: TextOverflow.ellipsis)),
                 ],
                 onChanged: (v) => setState(() => _toSquad = v!),
               ),
@@ -2017,33 +2021,36 @@ class _ScoringEntryScreenState extends State<ScoringEntryScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             DropdownButtonFormField<String>(
+              isExpanded: true,
               initialValue: _actionMode,
               decoration: const InputDecoration(labelText: "Action", prefixIcon: Icon(Icons.edit_note)),
               items: const [
-                DropdownMenuItem(value: "score", child: Text("Record score")),
-                DropdownMenuItem(value: "compensation", child: Text("Correct a previous score")),
+                DropdownMenuItem(value: "score", child: Text("Record score", overflow: TextOverflow.ellipsis)),
+                DropdownMenuItem(value: "compensation", child: Text("Correct a previous score", overflow: TextOverflow.ellipsis)),
               ],
               onChanged: (value) => setState(() => _actionMode = value ?? "score"),
             ),
             const SizedBox(height: 12),
             if (_actionMode == "score") ...[
               DropdownButtonFormField<String>(
+                isExpanded: true,
                 initialValue: _selectedTeam,
                 decoration: const InputDecoration(labelText: "Scoring team", prefixIcon: Icon(Icons.shield_outlined)),
                 items: [
-                  DropdownMenuItem(value: widget.homeTeamId, child: Text(widget.homeTeamId.toUpperCase())),
-                  DropdownMenuItem(value: widget.awayTeamId, child: Text(widget.awayTeamId.toUpperCase())),
+                  DropdownMenuItem(value: widget.homeTeamId, child: Text(widget.homeTeamId.toUpperCase(), overflow: TextOverflow.ellipsis)),
+                  DropdownMenuItem(value: widget.awayTeamId, child: Text(widget.awayTeamId.toUpperCase(), overflow: TextOverflow.ellipsis)),
                 ],
                 onChanged: (v) { if (v != null) setState(() => _selectedTeam = v); },
               ),
               const SizedBox(height: 12),
             DropdownButtonFormField<String>(
+              isExpanded: true,
               initialValue: _eventType,
               decoration: const InputDecoration(labelText: "Scoring event", prefixIcon: Icon(Icons.sports_soccer)),
               items: const [
-                DropdownMenuItem(value: "goal", child: Text("Goal (1 pt)")),
-                DropdownMenuItem(value: "two_pointer", child: Text("Two Pointer (2 pts)")),
-                DropdownMenuItem(value: "six", child: Text("Six (6 runs)")),
+                DropdownMenuItem(value: "goal", child: Text("Goal (1 pt)", overflow: TextOverflow.ellipsis)),
+                DropdownMenuItem(value: "two_pointer", child: Text("Two Pointer (2 pts)", overflow: TextOverflow.ellipsis)),
+                DropdownMenuItem(value: "six", child: Text("Six (6 runs)", overflow: TextOverflow.ellipsis)),
               ],
               onChanged: (v) => setState(() => _eventType = v!),
             ),
@@ -2051,9 +2058,10 @@ class _ScoringEntryScreenState extends State<ScoringEntryScreen> {
               if (widget.compensatableEventIds.isEmpty)
                 const EmptyState(icon: Icons.undo, title: "No score event to correct", message: "Score a goal first, then you can add a correction.")
               else DropdownButtonFormField<String>(
+                isExpanded: true,
                 initialValue: _selectedCompensation,
                 decoration: const InputDecoration(labelText: "Event to correct", prefixIcon: Icon(Icons.undo)),
-                items: widget.compensatableEventIds.map((id) => DropdownMenuItem(value: id, child: Text(id))).toList(),
+                items: widget.compensatableEventIds.map((id) => DropdownMenuItem(value: id, child: Text(id, overflow: TextOverflow.ellipsis))).toList(),
                 onChanged: (id) => setState(() => _selectedCompensation = id),
               ),
               const SizedBox(height: 12),
