@@ -1,9 +1,10 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
-  static const String defaultBaseUrl = "http://10.0.2.2:8080";
+  static const String defaultBaseUrl = kIsWeb ? "http://localhost:8080" : "http://10.0.2.2:8080";
   static String baseUrl = defaultBaseUrl;
   static String? currentToken;
   static String currentRole = "viewer";
@@ -11,7 +12,12 @@ class ApiService {
 
   static Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
-    baseUrl = prefs.getString("server_url") ?? defaultBaseUrl;
+    final saved = prefs.getString("server_url");
+    if (kIsWeb) {
+      baseUrl = (saved == null || saved.contains("10.0.2.2")) ? "http://localhost:8080" : saved;
+    } else {
+      baseUrl = saved ?? defaultBaseUrl;
+    }
     currentToken = prefs.getString("auth_token");
     currentRole = prefs.getString("auth_role") ?? "viewer";
     currentEmail = prefs.getString("auth_email") ?? "viewer@nascon.test";

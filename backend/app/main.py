@@ -18,7 +18,17 @@ from app.services.store import store_service
 from app.services.rbac import generate_rbac_matrix_response, check_probe_authorization
 from app.services.sync import offline_sync_service
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title="NaSCon 26 Multi-Sport Platform")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Rolling 10s Rate Limiter for /api/v1/*
 ip_request_timestamps = collections.defaultdict(list)

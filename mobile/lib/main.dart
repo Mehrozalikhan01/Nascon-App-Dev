@@ -123,6 +123,24 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
     return Scaffold(
       appBar: AppBar(
+        leading: Padding(
+          padding: const EdgeInsets.all(8.0),
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFD97706)]),
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(color: Colors.black26, blurRadius: 4, offset: const Offset(0, 2)),
+              ],
+            ),
+            child: const Center(
+              child: Text(
+                "N26",
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+              ),
+            ),
+          ),
+        ),
         title: const Text("NaSCon League & Club Ops"),
         actions: [
           // Offline / Online Status Badge
@@ -980,6 +998,60 @@ class AccountScreen extends StatelessWidget {
             leading: const CircleAvatar(child: Icon(Icons.person)),
             title: Text(ApiService.currentEmail, style: const TextStyle(fontWeight: FontWeight.bold)),
             subtitle: Text("Role: ${ApiService.currentRole.toUpperCase()}"),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text("Backend Server Configuration", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                const SizedBox(height: 4),
+                Text("Target: ${ApiService.baseUrl}", style: const TextStyle(color: Colors.blueGrey, fontSize: 13)),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    ActionChip(
+                      avatar: const Icon(Icons.computer, size: 16),
+                      label: const Text("localhost:8080"),
+                      onPressed: () async {
+                        await ApiService.setServerUrl("http://localhost:8080");
+                        onRoleChanged();
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Connected to http://localhost:8080")));
+                        }
+                      },
+                    ),
+                    ActionChip(
+                      avatar: const Icon(Icons.wifi, size: 16),
+                      label: const Text("LAN IP: 172.15.4.12:8080"),
+                      onPressed: () async {
+                        await ApiService.setServerUrl("http://172.15.4.12:8080");
+                        onRoleChanged();
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Connected to http://172.15.4.12:8080")));
+                        }
+                      },
+                    ),
+                    ActionChip(
+                      avatar: const Icon(Icons.phone_android, size: 16),
+                      label: const Text("Emulator (10.0.2.2)"),
+                      onPressed: () async {
+                        await ApiService.setServerUrl("http://10.0.2.2:8080");
+                        onRoleChanged();
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Connected to http://10.0.2.2:8080")));
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 16),
