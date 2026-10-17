@@ -183,7 +183,7 @@ async def validation_and_security_middleware(request: Request, call_next):
     return response
 
 # --- HEALTH & ROOT ---
-@app.get("/")
+@app.api_route("/", methods=["GET", "POST", "OPTIONS"])
 def root():
     return {"status": "ok", "service": "nascon-league-ops"}
 
