@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nascon_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: nascon_league
+      POSTGRES_USER: nascon
+      POSTGRES_PASSWORD: nascon_secure_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nascon -d nascon_league"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+  redis:
+    image: redis:7-alpine
+    container_name: nascon_redis
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 2s
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nascon_api
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      DAY1_SALT: ${DAY1_SALT}
+      DATABASE_URL: postgresql://nascon:nascon_secure_password@postgres:5432/nascon_league
+      REDIS_URL: redis://redis:6379/0
+      PORT: 8080
+      HOST: 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
