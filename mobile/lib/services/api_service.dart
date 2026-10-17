@@ -9,7 +9,14 @@ class ApiService {
   static const MethodChannel _secureChannel = MethodChannel('nascon.secure_storage');
   static const MethodChannel _localChannel = MethodChannel('nascon.local_store');
   static const String defaultBaseUrl = "http://localhost:8080";
-  static String baseUrl = defaultBaseUrl;
+  static String _baseUrl = defaultBaseUrl;
+  static String get baseUrl => _baseUrl;
+  static set baseUrl(String value) {
+    var raw = value.trim();
+    if (raw.contains('?')) raw = raw.split('?').first;
+    if (raw.contains('#')) raw = raw.split('#').first;
+    _baseUrl = raw.replaceFirst(RegExp(r'/+$'), '');
+  }
   static String? currentToken;
   static String currentRole = "viewer";
   static String currentEmail = "viewer@nascon.test";
@@ -84,14 +91,23 @@ class ApiService {
     await prefs.setString("server_url", normalized);
   }
 
+  static String get cleanBaseUrl {
+    var raw = baseUrl.trim();
+    if (raw.contains('?')) raw = raw.split('?').first;
+    if (raw.contains('#')) raw = raw.split('#').first;
+    return raw.replaceFirst(RegExp(r'/+$'), '');
+  }
+
   static String _normalizeServerUrl(String url) {
-    final parsed = Uri.tryParse(url.trim());
+    var raw = url.trim();
+    if (raw.contains('?')) raw = raw.split('?').first;
+    if (raw.contains('#')) raw = raw.split('#').first;
+    raw = raw.replaceFirst(RegExp(r'/+$'), '');
+    final parsed = Uri.tryParse(raw);
     if (parsed == null ||
         !const {"http", "https"}.contains(parsed.scheme) ||
         parsed.host.isEmpty ||
         parsed.userInfo.isNotEmpty ||
-        parsed.query.isNotEmpty ||
-        parsed.fragment.isNotEmpty ||
         (parsed.path.isNotEmpty && parsed.path != "/")) {
       throw const FormatException("Enter a valid server address, such as http://192.168.1.20:8080");
     }
@@ -157,7 +173,7 @@ class ApiService {
 
   static Future<Map<String, dynamic>> login(String email, String password) async {
     final response = await http.post(
-      Uri.parse("$baseUrl/api/v1/auth/login"),
+      Uri.parse("$cleanBaseUrl/api/v1/auth/login"),
       headers: const {"Content-Type": "application/json"},
       body: jsonEncode({"email": email.trim(), "password": password}),
     ).timeout(const Duration(seconds: 10));
@@ -172,7 +188,11 @@ class ApiService {
             : "We could not sign you in. Check your server connection and try again.",
       );
     }
-    final user = Map<String, dynamic>.from(decoded["user"] as Map);
+    final userMap = decoded["user"];
+    if (userMap is! Map) {
+      throw const ApiException("LOGIN_FAILED", "Invalid server response. Please try again.");
+    }
+    final user = Map<String, dynamic>.from(userMap);
     await saveAuth(
       decoded["access_token"].toString(),
       user["role"].toString(),
@@ -203,7 +223,7 @@ class ApiService {
     if (online) {
       try {
         final res = await http
-            .get(Uri.parse("$baseUrl/audit/v1/mobile/overview"), headers: currentToken == null
+            .get(Uri.parse("$cleanBaseUrl/audit/v1/mobile/overview"), headers: currentToken == null
                 ? const {}
                 : {"Authorization": "Bearer $currentToken"})
             .timeout(const Duration(seconds: 8));
@@ -291,7 +311,7 @@ class ApiService {
   // --- API CALLS ---
   static Future<bool> checkHealth() async {
     try {
-      final res = await http.get(Uri.parse("$baseUrl/health")).timeout(const Duration(seconds: 4));
+      final res = await http.get(Uri.parse("$cleanBaseUrl/health")).timeout(const Duration(seconds: 4));
       if (res.statusCode != 200) return false;
       final body = jsonDecode(res.body);
       return body is Map && body["status"] == "ok";
@@ -314,7 +334,7 @@ class ApiService {
       final batch = queue.sublist(start, end);
       try {
         final res = await http.post(
-          Uri.parse("$baseUrl/audit/v1/offline-sync"),
+          Uri.parse("$cleanBaseUrl/audit/v1/offline-sync"),
           headers: const {"Content-Type": "application/json"},
           body: jsonEncode({"device_id": deviceId, "actions": batch}),
         ).timeout(const Duration(seconds: 8));
