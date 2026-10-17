@@ -182,10 +182,15 @@ async def validation_and_security_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
-# --- HEALTH ---
+# --- HEALTH & ROOT ---
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "nascon-league-ops"}
+
 @app.get("/health")
 def health_probe():
     return {"status": "ok"}
+
 
 
 # --- RESET ---
