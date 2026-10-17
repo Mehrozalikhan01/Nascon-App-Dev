@@ -1,7 +1,7 @@
 import base64
 import math
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from app.core.config import settings
 from app.core.security import sign
@@ -181,7 +181,7 @@ class StoreService:
             discount_minor = math.floor(subtotal_minor * 10 / 100)
 
         total_minor = subtotal_minor - discount_minor
-        paid_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        paid_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Format total as PKR 4500.00
         major_units = total_minor / 100.0
