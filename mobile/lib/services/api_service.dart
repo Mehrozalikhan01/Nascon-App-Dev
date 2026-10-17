@@ -126,11 +126,7 @@ class ApiService {
     final octets = parts.map(int.tryParse).toList();
     if (octets.any((part) => part == null || part < 0 || part > 255)) return false;
     final first = octets[0]!;
-    final second = octets[1]!;
-    return first == 10 || first == 127 ||
-        (first == 192 && second == 168) ||
-        (first == 172 && second >= 16 && second <= 31) ||
-        (first == 169 && second == 254);
+    return first == 10 || first == 127 || first == 172 || first == 192 || first == 169;
   }
 
   static Future<void> saveAuth(String token, String role, String email) async {
