@@ -8,7 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 class ApiService {
   static const MethodChannel _secureChannel = MethodChannel('nascon.secure_storage');
   static const MethodChannel _localChannel = MethodChannel('nascon.local_store');
-  static const String defaultBaseUrl = kIsWeb ? "http://localhost:8080" : "http://10.0.2.2:8080";
+  static const String defaultBaseUrl = "http://localhost:8080";
   static String baseUrl = defaultBaseUrl;
   static String? currentToken;
   static String currentRole = "viewer";
@@ -44,7 +44,7 @@ class ApiService {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString("server_url");
     var candidate = saved ?? defaultBaseUrl;
-    if (kIsWeb && candidate.contains("10.0.2.2")) {
+    if (candidate.contains("10.0.2.2")) {
       candidate = "http://localhost:8080";
     }
     try {
