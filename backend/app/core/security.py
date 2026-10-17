@@ -6,7 +6,11 @@ import jwt
 from typing import Any, Dict
 from app.core.config import settings
 
-JWT_SECRET = "nascon_jwt_internal_secret_key_2026"
+JWT_SECRET = settings.JWT_SECRET or hmac.new(
+    settings.DAY1_SALT.encode("utf-8"),
+    b"nascon-jwt-signing-key:v1",
+    hashlib.sha256,
+).hexdigest()
 JWT_ALGORITHM = "HS256"
 
 def canonical(obj: Any) -> str:

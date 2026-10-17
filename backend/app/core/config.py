@@ -1,11 +1,27 @@
-import os
-from pydantic_settings import BaseSettings
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class Settings(BaseSettings):
-    DAY1_SALT: str = os.environ.get("DAY1_SALT", "T15D1b255e2e8e2e")
-    DATABASE_URL: str = os.environ.get("DATABASE_URL", "postgresql://nascon:nascon_secure_password@postgres:5432/nascon_league")
-    REDIS_URL: str = os.environ.get("REDIS_URL", "redis://redis:6379/0")
-    PORT: int = int(os.environ.get("PORT", "8080"))
-    HOST: str = os.environ.get("HOST", "0.0.0.0")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # The competition salt is supplied by the grader at process start. Never
+    # fall back to a value committed to the repository.
+    DAY1_SALT: str
+    JWT_SECRET: str = ""
+    DATABASE_URL: str = ""
+    REDIS_URL: str = ""
+    CORS_ORIGINS: str = "http://localhost,http://127.0.0.1"
+    CORS_ORIGIN_REGEX: str = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+    PORT: int = 8080
+    HOST: str = "0.0.0.0"
+
+    @field_validator("DAY1_SALT")
+    @classmethod
+    def require_day1_salt(cls, value: str) -> str:
+        if not value:
+            raise ValueError("DAY1_SALT must be provided in the environment")
+        return value
+
 
 settings = Settings()

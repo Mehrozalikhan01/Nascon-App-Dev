@@ -1,5 +1,6 @@
 import base64
 import math
+import re
 import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
@@ -7,24 +8,53 @@ from app.core.config import settings
 from app.core.security import sign
 
 def generate_pdf_receipt(order_id: str, amount_formatted: str) -> str:
-    stream = f"BT\n/F1 16 Tf\n50 720 Td\n(NaSCon 26 Official Receipt) Tj\n0 -30 Td\n(Order: {order_id}) Tj\n0 -30 Td\n(Total: {amount_formatted}) Tj\nET\n"
-    stream_bytes = stream.encode("utf-8")
-    length = len(stream_bytes)
-    pdf = (
-        "%PDF-1.4\n"
-        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-        "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
-        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n"
-        f"4 0 obj\n<< /Length {length} >>\nstream\n{stream}endstream\nendobj\n"
-        "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
-        "xref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n"
-        "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n300\n%%EOF"
+    def escape_pdf_text(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+    text_stream = (
+        "BT\n/F1 10 Tf\n48 754 Td\n(NASCON '26  -  CLUB STORE) Tj\n"
+        "/F1 22 Tf\n0 -35 Td\n(Official payment receipt) Tj\n"
+        "/F1 10 Tf\n0 -40 Td\n(ORDER REFERENCE) Tj\n"
+        "/F1 13 Tf\n0 -20 Td\n(" + escape_pdf_text(order_id) + ") Tj\n"
+        "/F1 10 Tf\n0 -38 Td\n(PAYMENT STATUS                       TOTAL PAID) Tj\n"
+        "/F1 14 Tf\n0 -23 Td\n(PAID                                      " + escape_pdf_text(amount_formatted) + ") Tj\n"
+        "/F1 9 Tf\n0 -45 Td\n(This receipt confirms a successful payment in the NaSCon demo store.) Tj\n"
+        "0 -16 Td\n(The payment gateway used for this event environment is simulated.) Tj\n"
+        "ET\n"
+    ).encode("ascii")
+
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length " + str(len(text_stream)).encode("ascii") + b" >>\nstream\n"
+        + text_stream + b"endstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for object_number, body in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{object_number} 0 obj\n".encode("ascii"))
+        pdf.extend(body)
+        pdf.extend(b"\nendobj\n")
+
+    xref_offset = len(pdf)
+    pdf.extend(f"xref\n0 {len(offsets)}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\n"
+        f"startxref\n{xref_offset}\n%%EOF\n".encode("ascii")
     )
-    return base64.b64encode(pdf.encode("utf-8")).decode("utf-8")
+    return base64.b64encode(bytes(pdf)).decode("ascii")
 
 class StoreService:
     def __init__(self):
         self._lock = threading.Lock()
+        self._checkout_lock = threading.RLock()
         self._stock: Dict[str, int] = {}
         self._reserved: Dict[str, int] = {}
         self._orders: Dict[str, Dict[str, Any]] = {}
@@ -64,17 +94,29 @@ class StoreService:
             }
 
     def checkout(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        # Keep idempotency lookup, stock reservation, payment, and order commit
+        # in one critical section so concurrent requests cannot double-charge
+        # the same order id.
+        with self._checkout_lock:
+            return self._checkout(data)
+
+    def _checkout(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            return {"error": "VALIDATION_ERROR", "fields": ["body"]}
         order_id = data.get("order_id")
         customer_id = data.get("customer_id")
         items = data.get("items")
         discount_code = data.get("discount_code")
         payment = data.get("payment", {})
+        if not isinstance(payment, dict):
+            return {"error": "VALIDATION_ERROR", "fields": ["payment"]}
         token = payment.get("token")
 
         # 1. Validation Order: 1) 400 Schema/Malformed
-        if not order_id or not isinstance(order_id, str):
+        valid_id = lambda value: isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", value) is not None
+        if not valid_id(order_id):
             return {"error": "VALIDATION_ERROR", "fields": ["order_id"]}
-        if not customer_id or not isinstance(customer_id, str):
+        if not valid_id(customer_id):
             return {"error": "VALIDATION_ERROR", "fields": ["customer_id"]}
         if not items or not isinstance(items, list) or len(items) < 1 or len(items) > 10:
             return {"error": "VALIDATION_ERROR", "fields": ["items"]}
@@ -82,22 +124,31 @@ class StoreService:
         # Check items structure
         variant_ids_seen = set()
         for it in items:
+            if not isinstance(it, dict):
+                return {"error": "VALIDATION_ERROR", "fields": ["items"]}
             vid = it.get("variant_id")
             qty = it.get("quantity")
-            if not vid or not qty or not isinstance(qty, int) or qty < 1 or qty > 10:
+            if not isinstance(vid, str) or not vid or isinstance(qty, bool) or not isinstance(qty, int) or qty < 1 or qty > 10:
                 return {"error": "VALIDATION_ERROR", "fields": ["items"]}
             if vid in variant_ids_seen:
                 return {"error": "VALIDATION_ERROR", "fields": ["items"]}
             variant_ids_seen.add(vid)
 
+        if not isinstance(token, str) or not token:
+            return {"error": "VALIDATION_ERROR", "fields": ["payment.token"]}
+        if discount_code is not None and not isinstance(discount_code, str):
+            return {"error": "VALIDATION_ERROR", "fields": ["discount_code"]}
+
+        # Idempotency is defined over the complete request body. Keeping all
+        # fields prevents a changed payment token or extra option from being
+        # mistaken for a replay of a previously captured order.
+        request_fingerprint = dict(data)
+
         # Idempotency check
         with self._lock:
             if order_id in self._orders:
                 existing = self._orders[order_id]
-                # Compare body
-                if (existing["req_data"]["customer_id"] == customer_id and
-                    existing["req_data"]["items"] == items and
-                    existing["req_data"]["discount_code"] == discount_code):
+                if existing["req_data"] == request_fingerprint:
                     return {"is_replay": True, "response": existing["response"]}
                 return {"error": "DUPLICATE_ORDER_ID"}
 
@@ -222,7 +273,7 @@ class StoreService:
 
         with self._lock:
             self._orders[order_id] = {
-                "req_data": data,
+                "req_data": request_fingerprint,
                 "response": response
             }
 

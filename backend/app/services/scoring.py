@@ -1,4 +1,5 @@
 from typing import Dict, Any, List, Optional
+import re
 from app.core.config import settings
 from app.core.security import sign, canonical
 from app.services.sports import sports_service
@@ -17,20 +18,35 @@ class ScoringService:
     def get_match_events(self, match_id: str) -> Optional[List[Dict[str, Any]]]:
         return self._match_events.get(match_id)
 
-    def init_match(self, match_id: str, sport_id: str, home_team_id: str, away_team_id: str, league_id: Optional[str] = None):
+    def init_match(
+        self,
+        match_id: str,
+        sport_id: str,
+        home_team_id: str,
+        away_team_id: str,
+        league_id: Optional[str] = None,
+        *,
+        event_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ):
         if match_id in self._match_events:
             return {"error": "MATCH_EXISTS"}
+        event_id = event_id or f"init-{match_id}"
+        # Preserve the exact request payload for signature verification. In
+        # particular, an omitted optional league_id must not be added as null.
+        event_payload = dict(payload) if payload is not None else {
+            "sport_id": sport_id,
+            "home_team_id": home_team_id,
+            "away_team_id": away_team_id,
+        }
+        if payload is None and league_id is not None:
+            event_payload["league_id"] = league_id
         init_evt = {
             "sequence": 1,
-            "event_id": f"init-{match_id}",
+            "event_id": event_id,
             "match_id": match_id,
             "type": "match_init",
-            "payload": {
-                "sport_id": sport_id,
-                "home_team_id": home_team_id,
-                "away_team_id": away_team_id,
-                "league_id": league_id
-            },
+            "payload": event_payload,
             "compensated": False,
             "compensated_by": None
         }
@@ -40,6 +56,11 @@ class ScoringService:
         return {"status": "ok"}
 
     def append_event(self, event_id: str, match_id: str, evt_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        valid_id = lambda value: isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", value) is not None
+        if not valid_id(event_id) or not valid_id(match_id):
+            return {"error": "VALIDATION_ERROR", "fields": ["event_id", "match_id"]}
+        if not isinstance(evt_type, str) or not evt_type or not isinstance(payload, dict):
+            return {"error": "VALIDATION_ERROR", "fields": ["type", "payload"]}
         # Idempotency check
         if event_id in self._events_by_id:
             existing = self._events_by_id[event_id]
@@ -67,11 +88,18 @@ class ScoringService:
             away_t = payload.get("away_team_id")
             if not home_t or not away_t:
                 return {"error": "VALIDATION_ERROR", "fields": ["home_team_id", "away_team_id"]}
-            self.init_match(match_id, sport_id, home_t, away_t, payload.get("league_id"))
-            evt = self._match_events[match_id][0]
-            evt["event_id"] = event_id
-            evt["signature"] = sign(settings.DAY1_SALT, event_id, payload)
-            self._events_by_id[event_id] = evt
+            init_result = self.init_match(
+                match_id,
+                sport_id,
+                home_t,
+                away_t,
+                payload.get("league_id"),
+                event_id=event_id,
+                payload=payload,
+            )
+            if "error" in init_result:
+                return init_result
+            evt = self._events_by_id[event_id]
             return {
                 "event_id": event_id,
                 "match_id": match_id,

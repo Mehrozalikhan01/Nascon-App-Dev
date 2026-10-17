@@ -56,6 +56,8 @@ class RosterService:
                 "club_id": sq.get("club_id"),
                 "tenant_id": sq.get("tenant_id"),
                 "name": sq.get("name"),
+                "venue": sq.get("venue"),
+                "staff": dict(sq.get("staff", {})),
                 "league_id": league_id,
                 "player_ids": []
             }
@@ -89,6 +91,18 @@ class RosterService:
             "status": "configured",
             "squad_counts": squad_counts
         }
+
+    def get_squad_profile(self, squad_id: str) -> Optional[Dict[str, Any]]:
+        squad = self._squads.get(squad_id)
+        if squad is None:
+            return None
+        profile = {key: value for key, value in squad.items() if key != "player_ids"}
+        profile["roster"] = [
+            dict(self._players[player_id])
+            for player_id in squad["player_ids"]
+            if player_id in self._players
+        ]
+        return profile
 
     def transfer_player(self, data: Dict[str, Any]) -> Dict[str, Any]:
         req_id = data.get("request_id")

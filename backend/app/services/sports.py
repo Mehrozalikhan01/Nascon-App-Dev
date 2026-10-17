@@ -79,9 +79,11 @@ class SportsService:
         return self._sports.get(sport_id)
 
     def register_sport(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            return {"error": "VALIDATION_ERROR", "fields": ["body"]}
         bad_fields = []
         sport_id = data.get("sport_id")
-        if not sport_id or not isinstance(sport_id, str) or not re.match(r"^[a-z0-9_-]{2,40}$", sport_id):
+        if not isinstance(sport_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", sport_id):
             bad_fields.append("sport_id")
 
         name = data.get("name")
@@ -93,18 +95,21 @@ class SportsService:
             bad_fields.append("scoring_model")
 
         periods = data.get("periods")
+        def positive_int(value: Any) -> bool:
+            return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
         if not isinstance(periods, dict):
             bad_fields.append("periods")
         else:
             if model == "event":
-                if periods.get("count", 0) < 1 or periods.get("duration_minutes", 0) < 1:
+                if not positive_int(periods.get("count")) or not positive_int(periods.get("duration_minutes")):
                     bad_fields.append("periods")
             elif model == "innings":
-                if any(periods.get(k, 0) < 1 for k in ("innings_per_team", "overs_per_innings", "balls_per_over", "wickets_per_innings")):
+                if any(not positive_int(periods.get(k)) for k in ("innings_per_team", "overs_per_innings", "balls_per_over", "wickets_per_innings")):
                     bad_fields.append("periods")
             elif model == "round":
                 best_of = periods.get("best_of", 0)
-                if best_of < 1 or best_of % 2 == 0:
+                if not positive_int(best_of) or best_of % 2 == 0:
                     bad_fields.append("periods")
 
         scoring_events = data.get("scoring_events")
@@ -112,7 +117,19 @@ class SportsService:
             bad_fields.append("scoring_events")
         else:
             for k, v in scoring_events.items():
-                if not re.match(r"^[a-z0-9_]{1,40}$", k):
+                if not isinstance(k, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", k) or not isinstance(v, dict):
+                    bad_fields.append("scoring_events")
+                    break
+                if model == "innings":
+                    if (not isinstance(v.get("runs"), int) or isinstance(v.get("runs"), bool) or v["runs"] < 0 or
+                            not isinstance(v.get("legal_ball"), bool) or not isinstance(v.get("wicket"), bool)):
+                        bad_fields.append("scoring_events")
+                        break
+                elif model == "round":
+                    if not positive_int(v.get("rounds")):
+                        bad_fields.append("scoring_events")
+                        break
+                elif "points" in v and (not isinstance(v["points"], int) or isinstance(v["points"], bool) or v["points"] < 0):
                     bad_fields.append("scoring_events")
                     break
 
@@ -122,10 +139,25 @@ class SportsService:
         overtime = data.get("overtime")
         if not isinstance(overtime, dict) or overtime.get("policy") not in ("none", "extra_time", "shootout", "golden_score", "super_over"):
             bad_fields.append("overtime")
+        elif "duration_minutes" in overtime and not positive_int(overtime.get("duration_minutes")):
+            bad_fields.append("overtime")
 
         roster = data.get("roster")
-        if not isinstance(roster, dict) or roster.get("min_squad_size", 0) < 1 or roster.get("max_squad_size", 0) < roster.get("min_squad_size", 0):
+        if (not isinstance(roster, dict) or
+                not positive_int(roster.get("min_squad_size")) or
+                not positive_int(roster.get("max_squad_size")) or
+                roster.get("max_squad_size", 0) < roster.get("min_squad_size", 0) or
+                not isinstance(roster.get("required_positions", {}), dict)):
             bad_fields.append("roster")
+        elif any(not isinstance(position, str) or not positive_int(count) or count > roster["max_squad_size"]
+                 for position, count in roster.get("required_positions", {}).items()):
+            bad_fields.append("roster")
+
+        tie_breaks = data.get("tie_break_order", ["h2h_points", "h2h_diff", "overall_diff", "scored", "fair_play", "draw_lots"])
+        allowed_tie_breaks = {"h2h_points", "h2h_diff", "overall_diff", "scored", "fair_play", "draw_lots"}
+        if (not isinstance(tie_breaks, list) or any(not isinstance(item, str) or item not in allowed_tie_breaks for item in tie_breaks)
+                or len(tie_breaks) != len(set(tie_breaks))):
+            bad_fields.append("tie_break_order")
 
         if bad_fields:
             return {"error": "VALIDATION_ERROR", "fields": sorted(list(set(bad_fields)))}

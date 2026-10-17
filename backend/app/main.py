@@ -1,5 +1,8 @@
 import time
 import collections
+import threading
+import json
+import logging
 from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -17,21 +20,77 @@ from app.services.roster import roster_service
 from app.services.store import store_service
 from app.services.rbac import generate_rbac_matrix_response, check_probe_authorization
 from app.services.sync import offline_sync_service
+from app.services.auth import auth_service
 
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="NaSCon 26 Multi-Sport Platform")
+logger = logging.getLogger("nascon.api")
+
+
+class BodySizeLimitMiddleware:
+    """Enforce the payload limit even when a client streams without Content-Length."""
+
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        chunks = []
+        size = 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+            body = message.get("body", b"")
+            size += len(body)
+            if size > self.max_bytes:
+                response = JSONResponse(
+                    status_code=413,
+                    content={"error": {
+                        "code": "PAYLOAD_TOO_LARGE",
+                        "message": "Request body exceeds 1 MB limit.",
+                        "details": {},
+                    }},
+                )
+                await response(scope, receive, send)
+                return
+            chunks.append(message)
+            if not message.get("more_body", False):
+                break
+
+        next_chunk = 0
+
+        async def replay_request_body():
+            nonlocal next_chunk
+            if next_chunk < len(chunks):
+                message = chunks[next_chunk]
+                next_chunk += 1
+                return message
+            return await receive()
+
+        await self.app(scope, replay_request_body, send)
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()],
+    allow_origin_regex=settings.CORS_ORIGIN_REGEX,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=1024 * 1024)
 
 # Rolling 10s Rate Limiter for /api/v1/*
 ip_request_timestamps = collections.defaultdict(list)
+ip_request_lock = threading.Lock()
 
 def make_error(code: str, message: str, status_code: int, details: Optional[Dict[str, Any]] = None):
     return JSONResponse(
@@ -45,33 +104,80 @@ def make_error(code: str, message: str, status_code: int, details: Optional[Dict
         }
     )
 
+
+@app.post("/api/v1/auth/login")
+async def login(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return make_error("VALIDATION_ERROR", "Malformed JSON", 400)
+    if not isinstance(body, dict):
+        return make_error("VALIDATION_ERROR", "Login body must be a JSON object", 400)
+    if not isinstance(body.get("email"), str) or not isinstance(body.get("password"), str):
+        return make_error("VALIDATION_ERROR", "Email and password are required", 400, {"fields": ["email", "password"]})
+    result = auth_service.login(body.get("email"), body.get("password"))
+    if result is None:
+        return make_error("INVALID_CREDENTIALS", "Email or password is incorrect", 401)
+    return result
+
+
+@app.get("/api/v1/auth/me")
+def current_user(request: Request):
+    authorization = request.headers.get("authorization", "")
+    if not authorization.startswith("Bearer "):
+        return make_error("UNAUTHENTICATED", "Sign in to continue", 401)
+    claims = auth_service.authenticate(authorization[7:].strip())
+    if claims is None:
+        return make_error("UNAUTHENTICATED", "Your session has expired. Sign in again.", 401)
+    return {
+        "user_id": claims.get("sub"),
+        "role": claims.get("role"),
+        "tenant_id": claims.get("tenant_id"),
+        "league_id": claims.get("league_id"),
+        "club_id": claims.get("club_id"),
+        "player_id": claims.get("player_id"),
+    }
+
 @app.middleware("http")
 async def validation_and_security_middleware(request: Request, call_next):
     # Check body size limit 1 MB
     content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > 1024 * 1024:
-        return make_error("PAYLOAD_TOO_LARGE", "Request body exceeds 1 MB limit.", 413)
+    if content_length:
+        try:
+            body_size = int(content_length)
+        except ValueError:
+            return make_error("VALIDATION_ERROR", "Invalid Content-Length header.", 400)
+        if body_size < 0:
+            return make_error("VALIDATION_ERROR", "Invalid Content-Length header.", 400)
+        if body_size > 1024 * 1024:
+            return make_error("PAYLOAD_TOO_LARGE", "Request body exceeds 1 MB limit.", 413)
 
     # Rate limiting for /api/v1/* (100 req / rolling 10s)
     if request.url.path.startswith("/api/v1/"):
         client_ip = request.client.host if request.client else "127.0.0.1"
-        now = time.time()
-        timestamps = ip_request_timestamps[client_ip]
-        # Keep only timestamps in last 10s
-        ip_request_timestamps[client_ip] = [ts for ts in timestamps if now - ts < 10.0]
-        if len(ip_request_timestamps[client_ip]) >= 100:
-            return JSONResponse(
-                status_code=429,
-                headers={"Retry-After": "10"},
-                content={
-                    "error": {
-                        "code": "RATE_LIMITED",
-                        "message": "Rate limit exceeded (100 req per rolling 10 s).",
-                        "details": {}
+        now = time.monotonic()
+        with ip_request_lock:
+            # Expire old entries for this client and bound stale client state.
+            timestamps = [ts for ts in ip_request_timestamps[client_ip] if now - ts < 10.0]
+            if len(timestamps) >= 100:
+                ip_request_timestamps[client_ip] = timestamps
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": "10"},
+                    content={
+                        "error": {
+                            "code": "RATE_LIMITED",
+                            "message": "Rate limit exceeded (100 req per rolling 10 s).",
+                            "details": {}
+                        }
                     }
-                }
-            )
-        ip_request_timestamps[client_ip].append(now)
+                )
+            timestamps.append(now)
+            ip_request_timestamps[client_ip] = timestamps
+            if len(ip_request_timestamps) > 10000:
+                stale_ips = [ip for ip, values in ip_request_timestamps.items() if not values or now - values[-1] >= 10.0]
+                for ip in stale_ips:
+                    ip_request_timestamps.pop(ip, None)
 
     response = await call_next(request)
     return response
@@ -81,22 +187,34 @@ async def validation_and_security_middleware(request: Request, call_next):
 def health_probe():
     return {"status": "ok"}
 
+
 # --- RESET ---
-@app.post("/audit/v1/reset")
-async def reset_baseline(request: Request):
-    body = {}
-    try:
-        body = await request.json()
-    except Exception:
-        pass
+_baseline_seeded = False
 
-    seed = body.get("seed", 42)
-    stock_map = body.get("stock", {"var-jersey-001-M": 1, "var-jersey-001-L": 5})
 
+def _record_database_baseline():
+    if not settings.DATABASE_URL:
+        return
+    import psycopg
+
+    with psycopg.connect(settings.DATABASE_URL, connect_timeout=2) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS nascon_readiness ("
+            "id SMALLINT PRIMARY KEY CHECK (id = 1), "
+            "baseline_seeded BOOLEAN NOT NULL, seeded_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+        )
+        connection.execute(
+            "INSERT INTO nascon_readiness (id, baseline_seeded) VALUES (1, TRUE) "
+            "ON CONFLICT (id) DO UPDATE SET baseline_seeded = TRUE, seeded_at = NOW()"
+        )
+
+
+def initialize_baseline(seed: int = 42, stock_map: Optional[Dict[str, int]] = None):
+    global _baseline_seeded
     # Reset all services
     sports_service.init_baseline()
     scoring_service.reset()
-    standings_service.reset()
+    standings_service.reset(seed=seed)
     roster_service.reset()
     store_service.init_baseline(stock_map)
     offline_sync_service.reset()
@@ -109,12 +227,17 @@ async def reset_baseline(request: Request):
             "sport_id": "football"
         },
         "squads": [
-            {"squad_id": "club-alpha-1", "club_id": "club-alpha-1", "tenant_id": "tenant-alpha", "name": "Alpha 1"},
-            {"squad_id": "club-alpha-2", "club_id": "club-alpha-2", "tenant_id": "tenant-alpha", "name": "Alpha 2"}
+            {
+                "squad_id": "club-alpha-1", "club_id": "club-alpha-1", "tenant_id": "tenant-alpha",
+                "name": "Alpha Athletics FC", "venue": "Jinnah Stadium, Islamabad",
+                "staff": {"manager": "Tariq Ali", "coach": "Hamza Khan", "physio": "Sarah Ahmed"}
+            },
+            {"squad_id": "club-alpha-2", "club_id": "club-alpha-2", "tenant_id": "tenant-alpha", "name": "Alpha Reserves"}
         ],
         "players": [
-            {"player_id": "player-alpha-1", "name": "Player A1", "squad_id": "club-alpha-1", "role": "starter"},
-            {"player_id": "player-alpha-2", "name": "Player A2", "squad_id": "club-alpha-2", "role": "starter"}
+            {"player_id": "player-alpha-1", "name": "Ali Raza", "position": "gk", "squad_id": "club-alpha-1", "role": "captain"},
+            {"player_id": "player-alpha-3", "name": "Bilal Ahmed", "position": "df", "squad_id": "club-alpha-1", "role": "starter"},
+            {"player_id": "player-alpha-2", "name": "Usman Tariq", "position": "mf", "squad_id": "club-alpha-2", "role": "starter"}
         ]
     })
     roster_service.setup_roster({
@@ -131,6 +254,44 @@ async def reset_baseline(request: Request):
         ]
     })
 
+    # Register the demo league first; this creates the initial match records.
+    # Later score events are appended to those same records.
+    standings_service.register_league({
+        "league_id": "league-alpha-1",
+        "sport_id": "football",
+        "teams": ["t1", "t2", "t3", "t4"],
+        "fixtures": [
+            {"match_id": "demo-m1", "home": "t1", "away": "t2"},
+            {"match_id": "demo-m2", "home": "t3", "away": "t4"},
+        ],
+        "qualification": {"spots": 2},
+        "lots_seed": seed,
+    })
+
+    # Seed real demo score events for the mobile screens so the app can show
+    # API-backed data instead of fabricated local rows.
+    demo_match_specs = [
+        ("demo-m1", "t1", "t2", [("t1", "goal"), ("t1", "goal"), ("t2", "goal")], False),
+        ("demo-m2", "t3", "t4", [("t3", "goal")], True),
+    ]
+    for match_id, home, away, goals, completed in demo_match_specs:
+        scoring_service.append_event(f"demo-{match_id}-start", match_id, "match_start", {})
+        for index, (team_id, event_type) in enumerate(goals, start=1):
+            scoring_service.append_event(
+                f"demo-{match_id}-score-{index}", match_id, "score",
+                {"team_id": team_id, "event_type": event_type}
+            )
+        if completed:
+            scoring_service.append_event(f"demo-{match_id}-end", match_id, "match_end", {})
+
+    _baseline_seeded = True
+    try:
+        _record_database_baseline()
+    except Exception:
+        # The API can still start while Postgres is recovering. /health stays
+        # unready until a later reset records the baseline marker successfully.
+        pass
+
     return {
         "status": "reset_complete",
         "seed": seed,
@@ -142,6 +303,85 @@ async def reset_baseline(request: Request):
         }
     }
 
+
+def enqueue_order_paid_event(response: Dict[str, Any]):
+    """Publish a new paid-order event for the internal Redis worker."""
+    if not settings.REDIS_URL:
+        return
+    from redis import Redis
+
+    receipt = response.get("receipt", {})
+    payload = {
+        "event_id": f"order-paid:{response.get('order_id')}",
+        "type": "order.paid",
+        "order_id": response.get("order_id"),
+        "receipt_signature": receipt.get("signature") if isinstance(receipt, dict) else None,
+    }
+    client = Redis.from_url(settings.REDIS_URL, socket_connect_timeout=1, socket_timeout=1)
+    try:
+        client.rpush("nascon:events", json.dumps(payload, separators=(",", ":")))
+    finally:
+        client.close()
+
+
+initialize_baseline()
+
+
+@app.post("/audit/v1/reset")
+async def reset_baseline(request: Request):
+    raw_body = await request.body()
+    if raw_body:
+        try:
+            body = json.loads(raw_body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return make_error("VALIDATION_ERROR", "Malformed JSON", 400)
+        if not isinstance(body, dict):
+            return make_error("VALIDATION_ERROR", "Reset body must be a JSON object", 400)
+    else:
+        body = {}
+
+    seed = body.get("seed", 42)
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        return make_error("VALIDATION_ERROR", "Invalid reset seed", 400, {"fields": ["seed"]})
+    stock_map = body.get("stock", {"var-jersey-001-M": 1, "var-jersey-001-L": 5})
+    if not isinstance(stock_map, dict) or any(
+        not isinstance(key, str) or isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for key, value in stock_map.items()
+    ):
+        return make_error("VALIDATION_ERROR", "Invalid stock map", 400, {"fields": ["stock"]})
+
+    return initialize_baseline(seed, stock_map)
+
+
+@app.get("/audit/v1/mobile/overview")
+def mobile_overview(request: Request):
+    authorization = request.headers.get("authorization", "")
+    claims = auth_service.authenticate(authorization[7:].strip()) if authorization.startswith("Bearer ") else None
+    if claims is None:
+        return make_error("UNAUTHENTICATED", "Sign in to view club operations data", 401)
+    if claims.get("tenant_id") not in ("tenant-alpha", "global"):
+        return make_error("FORBIDDEN", "This account cannot view the demo tenant", 403)
+    fixture_ids = ("demo-m1", "demo-m2")
+    fixtures = [
+        scoring_service.project_match(match_id)
+        for match_id in fixture_ids
+        if scoring_service.get_match_events(match_id) is not None
+    ]
+    standings = standings_service.compute_standings("league-alpha-1")
+    club = roster_service.get_squad_profile("club-alpha-1")
+    return {
+        "fixtures": fixtures,
+        "standings": standings or {"league_id": "league-alpha-1", "table": []},
+        "club": club or {},
+        "team_names": {
+            "t1": "Alpha United",
+            "t2": "Capital Rangers",
+            "t3": "River City FC",
+            "t4": "North Stars",
+        },
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
 # --- SPORTS ---
 @app.post("/audit/v1/sports")
 async def create_sport(request: Request):
@@ -149,6 +389,9 @@ async def create_sport(request: Request):
         body = await request.json()
     except Exception:
         return make_error("VALIDATION_ERROR", "Malformed JSON", 400)
+
+    if not isinstance(body, dict):
+        return make_error("VALIDATION_ERROR", "Request body must be a JSON object", 400)
 
     res = sports_service.register_sport(body)
     if "error" in res:
@@ -169,6 +412,9 @@ async def generate_fixtures(request: Request):
         body = await request.json()
     except Exception:
         return make_error("VALIDATION_ERROR", "Malformed JSON", 400)
+
+    if not isinstance(body, dict):
+        return make_error("VALIDATION_ERROR", "Request body must be a JSON object", 400)
 
     fmt = body.get("format")
     teams = body.get("teams", [])
@@ -202,6 +448,9 @@ async def register_league(request: Request):
     except Exception:
         return make_error("VALIDATION_ERROR", "Malformed JSON", 400)
 
+    if not isinstance(body, dict):
+        return make_error("VALIDATION_ERROR", "Request body must be a JSON object", 400)
+
     res = standings_service.register_league(body)
     if "error" in res:
         err = res["error"]
@@ -227,6 +476,9 @@ async def append_event(request: Request):
         body = await request.json()
     except Exception:
         return make_error("VALIDATION_ERROR", "Malformed JSON", 400)
+
+    if not isinstance(body, dict):
+        return make_error("VALIDATION_ERROR", "Request body must be a JSON object", 400)
 
     eid = body.get("event_id")
     mid = body.get("match_id")
@@ -289,6 +541,8 @@ async def setup_roster(request: Request):
         body = await request.json()
     except Exception:
         return make_error("VALIDATION_ERROR", "Malformed JSON", 400)
+    if not isinstance(body, dict):
+        return make_error("VALIDATION_ERROR", "Request body must be a JSON object", 400)
     return JSONResponse(status_code=201, content=roster_service.setup_roster(body))
 
 @app.post("/audit/v1/roster/transfer")
@@ -297,6 +551,9 @@ async def transfer_roster(request: Request):
         body = await request.json()
     except Exception:
         return make_error("VALIDATION_ERROR", "Malformed JSON", 400)
+
+    if not isinstance(body, dict):
+        return make_error("VALIDATION_ERROR", "Request body must be a JSON object", 400)
 
     res = roster_service.transfer_player(body)
     if "error" in res:
@@ -317,6 +574,12 @@ async def transfer_roster(request: Request):
         return make_error(err, f"Transfer error: {err}", st, {"fields": res.get("fields", [])} if err == "VALIDATION_ERROR" else {})
 
     st_code = 200 if res.get("is_replay") else 201
+    if st_code == 201 and res.get("response", {}).get("status") == "paid":
+        try:
+            enqueue_order_paid_event(res["response"])
+        except Exception:
+            # Preserve the checkout response if the queue is briefly unavailable.
+            logger.exception("Could not enqueue paid order event for %s", res["response"].get("order_id"))
     return JSONResponse(status_code=st_code, content=res["response"])
 
 @app.get("/audit/v1/roster/history/{player_id}")
@@ -333,6 +596,9 @@ async def checkout(request: Request):
         body = await request.json()
     except Exception:
         return make_error("VALIDATION_ERROR", "Malformed JSON", 400)
+
+    if not isinstance(body, dict):
+        return make_error("VALIDATION_ERROR", "Request body must be a JSON object", 400)
 
     res = store_service.checkout(body)
     if "error" in res:
@@ -449,6 +715,9 @@ async def offline_sync(request: Request):
         body = await request.json()
     except Exception:
         return make_error("VALIDATION_ERROR", "Malformed JSON", 400)
+
+    if not isinstance(body, dict):
+        return make_error("VALIDATION_ERROR", "Request body must be a JSON object", 400)
 
     device_id = body.get("device_id")
     actions = body.get("actions", [])

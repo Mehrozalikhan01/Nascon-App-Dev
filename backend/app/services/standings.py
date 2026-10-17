@@ -8,27 +8,35 @@ class StandingsService:
     def __init__(self):
         # league_id -> config
         self._leagues: Dict[str, Dict[str, Any]] = {}
+        self._reset_seed = 42
 
-    def reset(self):
+    def reset(self, seed: int = 42):
         self._leagues = {}
+        self._reset_seed = seed
 
     def get_league(self, league_id: str) -> Optional[Dict[str, Any]]:
         return self._leagues.get(league_id)
 
     def register_league(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            return {"error": "VALIDATION_ERROR", "fields": ["body"]}
         league_id = data.get("league_id")
         sport_id = data.get("sport_id")
         teams = data.get("teams", [])
         fixtures = data.get("fixtures", [])
 
-        if not league_id or not sport_id or not teams or not fixtures:
+        if not isinstance(league_id, str) or not league_id or not isinstance(sport_id, str) or not sport_id:
             return {"error": "VALIDATION_ERROR", "fields": ["league_id", "sport_id", "teams", "fixtures"]}
+        if not isinstance(teams, list) or not isinstance(fixtures, list) or not fixtures:
+            return {"error": "VALIDATION_ERROR", "fields": ["teams", "fixtures"]}
 
         sport = sports_service.get_sport(sport_id)
         if not sport:
             return {"error": "SPORT_NOT_FOUND"}
 
-        if len(teams) < 2 or len(teams) > 40 or len(set(teams)) != len(teams):
+        if (len(teams) < 2 or len(teams) > 40 or
+                any(not isinstance(team, str) or not team for team in teams) or
+                len(set(teams)) != len(teams)):
             return {"error": "VALIDATION_ERROR", "fields": ["teams"]}
 
         if league_id in self._leagues:
@@ -37,6 +45,8 @@ class StandingsService:
         team_set = set(teams)
         fixture_ids = set()
         for f in fixtures:
+            if not isinstance(f, dict):
+                return {"error": "VALIDATION_ERROR", "fields": ["fixtures"]}
             mid = f.get("match_id")
             h = f.get("home")
             a = f.get("away")
@@ -47,16 +57,36 @@ class StandingsService:
             fixture_ids.add(mid)
 
         points_cfg = data.get("points", {"win": 3, "draw": 1, "loss": 0})
+        if not isinstance(points_cfg, dict):
+            return {"error": "VALIDATION_ERROR", "fields": ["points"]}
+        normalized_points = {"win": 3, "draw": 1, "loss": 0}
+        for key in normalized_points:
+            if key in points_cfg:
+                value = points_cfg[key]
+                if isinstance(value, bool) or not isinstance(value, int):
+                    return {"error": "VALIDATION_ERROR", "fields": [f"points.{key}"]}
+                normalized_points[key] = value
+        points_cfg = normalized_points
         tie_break_order = data.get("tie_break_order", list(sport["tie_break_order"]))
+        allowed_tie_breaks = {"h2h_points", "h2h_diff", "overall_diff", "scored", "fair_play", "draw_lots"}
+        if (not isinstance(tie_break_order, list) or
+                any(not isinstance(item, str) or item not in allowed_tie_breaks for item in tie_break_order) or
+                len(set(tie_break_order)) != len(tie_break_order)):
+            return {"error": "VALIDATION_ERROR", "fields": ["tie_break_order"]}
+        tie_break_order = list(tie_break_order)
         if "draw_lots" not in tie_break_order:
             tie_break_order.append("draw_lots")
 
         qual = data.get("qualification", {"spots": 1})
+        if not isinstance(qual, dict):
+            return {"error": "VALIDATION_ERROR", "fields": ["qualification"]}
         spots = qual.get("spots", 1)
-        if spots < 1 or spots > len(teams):
+        if isinstance(spots, bool) or not isinstance(spots, int) or spots < 1 or spots > len(teams):
             return {"error": "VALIDATION_ERROR", "fields": ["qualification.spots"]}
 
-        lots_seed = data.get("lots_seed", 42)
+        lots_seed = data.get("lots_seed", self._reset_seed)
+        if isinstance(lots_seed, bool) or not isinstance(lots_seed, int):
+            return {"error": "VALIDATION_ERROR", "fields": ["lots_seed"]}
 
         # Register fixtures in scoring engine
         for f in fixtures:

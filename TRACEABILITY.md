@@ -1,18 +1,22 @@
-# TRACEABILITY MATRIX
+# Requirement traceability
 
-Comprehensive mapping of all Functional Requirements (FR) and Non-Functional Requirements (NFR) to implementation source files, API routes, and automated test vectors.
+This matrix follows the Part I specification. “Partial” means the listed path exists, but important acceptance conditions remain absent or have not been verified. The matrix is intentionally explicit so an implementation path is not mistaken for a passing requirement.
 
-| Req ID | Requirement Description | Implementation File(s) | API Route / Module | Automated Test Vector(s) |
-| :--- | :--- | :--- | :--- | :--- |
-| **FR-1.1** | Multi-Sport Taxonomy & Event-Sourced Scoring | `backend/app/services/sports.py`<br>`backend/app/services/scoring.py` | `POST /audit/v1/sports`<br>`POST /audit/v1/events`<br>`GET /audit/v1/score/{id}` | `tests/test_sports.py`<br>`tests/test_scoring.py` |
-| **FR-1.2** | League & Tournament Setup | `backend/app/services/leagues.py` | `POST /audit/v1/leagues` | `tests/test_leagues.py` |
-| **FR-1.3** | Match & Fixture Scheduling (RR, Swiss, Single/Double Elim) | `backend/app/services/fixtures.py` | `POST /audit/v1/fixtures` | `tests/test_fixtures.py` |
-| **FR-1.4** | Automated Standings, H2H, NRR & Deterministic Lots | `backend/app/services/standings.py` | `GET /audit/v1/standings/{id}` | `tests/test_standings.py` |
-| **FR-2.1** | Club Profiles & Multi-Tenant Data Isolation | `backend/app/services/clubs.py` | `POST /audit/v1/reset`<br>`/audit/v1/rbac/*` | `tests/test_rbac.py` |
-| **FR-2.2** | Roster, Transfers, Loans & Deferred Transfers | `backend/app/services/roster.py` | `POST /audit/v1/roster/*`<br>`GET /audit/v1/roster/history/{id}` | `tests/test_roster.py` |
-| **FR-2.3** | Concurrency-Safe Store, Inventory & Signed PDF | `backend/app/services/store.py`<br>`backend/app/services/pdf.py` | `POST /audit/v1/checkout`<br>`GET /audit/v1/inventory/{id}` | `tests/test_store.py` |
-| **FR-5.1** | 5-Tier Role-Based Access Control (RBAC) & Security | `backend/app/services/rbac.py`<br>`backend/app/services/auth.py` | `POST /audit/v1/rbac-matrix`<br>`/audit/v1/rbac/*` | `tests/test_rbac.py` |
-| **NFR-3** | Concurrency Correctness (20 Parallel Checkouts on 1 item) | `backend/app/services/store.py` | `POST /audit/v1/checkout` | `tests/test_concurrency.py` |
-| **NFR-4** | Offline Tolerance & Synchronization | `backend/app/services/sync.py`<br>`mobile/lib/services/offline_sync.dart` | `POST /audit/v1/offline-sync` | `tests/test_sync.py` |
-| **NFR-5** | Security, Rate Limiting & Input Validation | `backend/app/middleware/security.py` | `GET /api/v1/ping`<br>`/audit/v1/*` | `tests/test_security.py` |
-| **NFR-7** | Reproducibility & Docker Deployment | `docker-compose.yml`<br>`backend/Dockerfile` | `GET /health` | `tests/test_health.py` |
+| Requirement | Source and route | Tests | Status / gap |
+| --- | --- | --- | --- |
+| FR-1.1 Multi-sport taxonomy and event-sourced scoring | `backend/app/services/sports.py`, `backend/app/services/scoring.py`; `/audit/v1/sports`, `/audit/v1/events`, `/audit/v1/score/{match_id}` | `tests/test_all_endpoints.py`, `tests/test_regressions.py` | Partial: baseline and regression checks exist; full hidden mystery-sport, signature, and transition vectors are not verified. |
+| FR-1.2 League and tournament setup | `backend/app/services/standings.py`, `backend/app/services/fixtures.py`; `/audit/v1/leagues` | `tests/test_all_endpoints.py` | Partial: league configuration is in memory; exhaustive setup validation and persistence are absent. |
+| FR-1.3 Match and fixture scheduling | `backend/app/services/fixtures.py`; `/audit/v1/fixtures` | `tests/test_all_endpoints.py` | Partial: four formats have smoke coverage; hidden odd/even, bracket advancement, invalid-type, and edge vectors are not verified. |
+| FR-1.4 Standings, head-to-head, differentials, qualification and lots | `backend/app/services/standings.py`; `/audit/v1/standings/{league_id}` | `tests/test_all_endpoints.py`, `tests/test_regressions.py` | Partial: a baseline table and seed handling exist; exhaustive three-way head-to-head and clinched/eliminated vectors are not verified. |
+| FR-2.1 Club profiles and tenant isolation | `backend/app/services/roster.py`, `backend/app/services/rbac.py`, `backend/app/services/auth.py`; `/audit/v1/mobile/overview`, `/audit/v1/rbac/*` | `tests/test_all_endpoints.py` | Partial: the mobile overview checks tenant scope and seven RBAC probes exist; all domain endpoints do not enforce tenant/ownership policies. |
+| FR-2.2 Roster, transfers, loans and deferred transfers | `backend/app/services/roster.py`; `/audit/v1/roster/setup`, `/audit/v1/roster/transfer`, `/audit/v1/roster/history/{player_id}` | `tests/test_all_endpoints.py` | Partial: transfer/loan logic exists; persistence, full authorization boundaries, and complete edge-case coverage are unverified. |
+| FR-2.3 Store, concurrent checkout and signed PDF receipt | `backend/app/services/store.py`; `/audit/v1/checkout`, `/audit/v1/inventory/{variant_id}` | `tests/test_all_endpoints.py`, `tests/test_regressions.py` | Partial: checkout is serialized within one process and receipts are signed; there is no cross-process inventory transaction or persistent order store. |
+| FR-5.1 Five-role RBAC and security | `backend/app/services/rbac.py`, `backend/app/services/auth.py`, `backend/app/core/security.py`; `/api/v1/auth/*`, `/audit/v1/rbac-matrix`, `/audit/v1/rbac/*` | `tests/test_all_endpoints.py`, `tests/test_regressions.py` | Partial: login/JWT and probe authorization exist; the matrix is not enforced on every domain route, and credentials are demo-only. |
+| NFR-3 Concurrent checkout correctness | `backend/app/services/store.py` | `tests/test_all_endpoints.py` | Partial: thread-level locking protects one API process; no shared database transaction protects multiple workers/replicas. |
+| NFR-4 Offline caching and synchronization | `mobile/lib/services/api_service.dart`, `mobile/lib/main.dart`, Android SQLite/Keystore in `mobile/android/app/src/main/kotlin/com/nascon/league/mobile_app/MainActivity.kt`, `backend/app/services/sync.py`; `/audit/v1/offline-sync` | `tests/test_all_endpoints.py`, `tests/test_regressions.py` | Partial: Android cache/queue, retry safety, and per-action feedback exist; iOS secure storage, device walkthrough, and process-independent sync persistence are not verified. |
+| NFR-5 OWASP-oriented app/API security | `backend/app/main.py`, `backend/app/core/security.py`, `mobile/lib/services/api_service.dart`, Android manifest and `MainActivity.kt` | `tests/test_all_endpoints.py`, `tests/test_regressions.py` | Partial: request-size/rate checks, input checks, HTTPS policy for public app URLs, and Android Keystore are present; broader API authorization, iOS Keychain, and security testing remain. |
+| NFR-7 One-command reproducible deployment | `docker-compose.yml`, `backend/Dockerfile`, `.env.example` | `tests/test_all_endpoints.py` | Partial: API, PostgreSQL and Redis services are defined; MinIO, a worker, full domain persistence, clean-machine build, and readiness acceptance remain. |
+
+## Verification note
+
+`tests/test_all_endpoints.py` is an endpoint smoke suite, not proof that every PDF vector passes. The current local Python 3.14 environment hangs even on a minimal FastAPI `TestClient` request, so its endpoint suite cannot be used as a passing result here. Direct regressions in `tests/test_regressions.py` can run separately. A passing result on the competition's Python 3.11/Docker environment is still required before claiming full compliance.

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 240">
+<g transform="translate(10 10) scale(.43)">
+<rect width="512" height="512" rx="112" fill="#10284B"/><circle cx="256" cy="256" r="178" fill="none" stroke="#E4B557" stroke-width="10"/>
+<path d="M256 105 376 151 360 300 256 394 152 300 136 151Z" fill="#117A61" stroke="#F0C96F" stroke-width="9" stroke-linejoin="round"/>
+<path d="M199 296V194h30l55 62v-62h29v102h-28l-57-64v64Z" fill="#FFFEFC"/></g>
+<text x="258" y="116" fill="#10284B" font-family="Arial,sans-serif" font-size="84" font-weight="800" letter-spacing="2">NaSCon</text>
+<text x="265" y="178" fill="#527184" font-family="Arial,sans-serif" font-size="34" font-weight="600" letter-spacing="5">LEAGUE &amp; CLUB OPS</text>
+<text x="843" y="116" fill="#117A61" font-family="Arial,sans-serif" font-size="76" font-weight="800">'26</text>
+</svg>

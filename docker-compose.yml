@@ -4,11 +4,11 @@ services:
     container_name: nascon_postgres
     restart: always
     environment:
-      POSTGRES_DB: nascon_league
-      POSTGRES_USER: nascon
-      POSTGRES_PASSWORD: nascon_secure_password
+      POSTGRES_DB: ${POSTGRES_DB:-nascon_league}
+      POSTGRES_USER: ${POSTGRES_USER:-nascon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nascon_secure_password}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nascon -d nascon_league"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 3s
       timeout: 3s
       retries: 10
@@ -34,11 +34,14 @@ services:
     ports:
       - "8080:8080"
     environment:
-      DAY1_SALT: ${DAY1_SALT}
-      DATABASE_URL: postgresql://nascon:nascon_secure_password@postgres:5432/nascon_league
-      REDIS_URL: redis://redis:6379/0
-      PORT: 8080
-      HOST: 0.0.0.0
+      DAY1_SALT: ${DAY1_SALT:?DAY1_SALT must be set before starting the API}
+      JWT_SECRET: ${JWT_SECRET:-}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://nascon:nascon_secure_password@postgres:5432/nascon_league}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://127.0.0.1}
+      CORS_ORIGIN_REGEX: ${CORS_ORIGIN_REGEX:-^https?://(localhost|127\.0\.0\.1)(:\d+)?$}
+      PORT: ${PORT:-8080}
+      HOST: ${HOST:-0.0.0.0}
     volumes:
       - ./backend:/app
     depends_on:
