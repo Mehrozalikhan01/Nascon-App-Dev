@@ -6,7 +6,11 @@ import 'services/api_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await ApiService.init();
+  try {
+    await ApiService.init();
+  } catch (e) {
+    debugPrint("Init error: $e");
+  }
   runApp(const NasconLeagueApp());
 }
 
