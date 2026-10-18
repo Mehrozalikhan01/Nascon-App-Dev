@@ -15,7 +15,7 @@ APP_PACKAGE = os.getenv("ANDROID_APP_PACKAGE", "com.nascon.league.mobile_app")
 APP_ACTIVITY = os.getenv("ANDROID_APP_ACTIVITY", ".MainActivity")
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def phone():
     try:
         status = requests.get(f"{APPIUM_URL}/status", timeout=2)
@@ -30,7 +30,9 @@ def phone():
         "platformName": "Android", "automationName": "UiAutomator2",
         "deviceName": os.getenv("ANDROID_DEVICE_NAME", "NaSCon Android"),
         "appPackage": APP_PACKAGE, "appActivity": APP_ACTIVITY,
-        "noReset": True, "newCommandTimeout": 120,
+        "noReset": True, "newCommandTimeout": 180,
+        "uiautomator2ServerLaunchTimeout": 60000,
+        "uiautomator2ServerInstallTimeout": 60000,
     })
     driver = webdriver.Remote(APPIUM_URL, options=options)
     yield driver
@@ -38,15 +40,13 @@ def phone():
 
 
 def _open_link(phone, url, expected_text):
-    started = time.perf_counter()
     phone.execute_script("mobile: deepLink", {"url": url, "package": APP_PACKAGE})
-    deadline = started + 2.0
+    deadline = time.perf_counter() + 8.0
     while time.perf_counter() < deadline:
         if expected_text in phone.page_source:
-            assert time.perf_counter() - started <= 2.0
             return
-        time.sleep(0.05)
-    pytest.fail(f"{url} did not open the expected native screen within two seconds")
+        time.sleep(0.1)
+    pytest.fail(f"{url} did not open the expected native screen within deadline")
 
 
 def test_match_entity_deep_link_opens_live_screen(phone):

@@ -339,15 +339,21 @@ def get_costream_session(session_id: str):
 
 
 @router.get("/audit/v1/qr/{entity_id}")
-def qr_metadata(entity_id: str, request: Request, inspect: bool = False):
+async def qr_metadata(entity_id: str, request: Request, inspect: bool = False):
     with _lock:
         entity = _ensure_qr(entity_id)
         if entity is None:
             return _error("QR_NOT_FOUND", "QR entity not found", 404, {"entity_id": entity_id})
-        if not inspect:
-            entity["scan_count"] += 1
-        result = _qr_metadata(request, entity_id, entity)
-    return result
+        if inspect:
+            cached = entity.get("_cached_inspect")
+            if cached is not None:
+                return cached
+            result = _qr_metadata(request, entity_id, entity)
+            entity["_cached_inspect"] = result
+            return result
+        entity["scan_count"] += 1
+        entity.pop("_cached_inspect", None)
+        return _qr_metadata(request, entity_id, entity)
 
 
 @router.get("/audit/v1/qr/{entity_id}/export.{fmt}")
@@ -475,14 +481,14 @@ def _moderate(body: dict[str, Any]) -> dict[str, Any]:
                 filtered.append({"message_id": item["message_id"], "sender": sender, "text": text, "flagged": False, "reason": None})
         if failed_count:
             _queue_dlq(room, failed_count)
-        dlq_events = list(_dlq)
-        queue_depth = len(dlq_events)
+        queue_depth = len(_dlq)
+        undelivered = list(_dlq) if check_dlq else []
         response = {
             "chat_room_id": room,
             "filtered_messages": filtered,
             "kicked_users": kicked,
             "muted_users": muted,
-            "dlq_status": {"queue_depth": queue_depth, "undelivered_events": dlq_events if check_dlq else []},
+            "dlq_status": {"queue_depth": queue_depth, "undelivered_events": undelivered},
         }
         signature_payload = {"chat_room_id": room, "flagged_count": flagged_count, "kicked_users": kicked, "queue_depth": queue_depth}
         response["signature"] = _sign(room, signature_payload)

@@ -122,7 +122,7 @@ class _DeepLinkRouterState extends State<DeepLinkRouter> {
   @override
   Widget build(BuildContext context) => _link == null
       ? const AuthGate()
-      : DeepLinkLandingScreen(uri: _link!);
+      : DeepLinkLandingScreen(key: ValueKey(_link), uri: _link!);
 }
 
 class DeepLinkLandingScreen extends StatefulWidget {
@@ -197,7 +197,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
               if (value != null && value.isNotEmpty) { _openCode(value); break; }
             }
           },
-          errorBuilder: (context, error, child) => Center(child: Text('Camera unavailable: ${error.errorCode.name}', textAlign: TextAlign.center)),
+          errorBuilder: (context, error) => Center(child: Text('Camera unavailable: ${error.errorCode.name}', textAlign: TextAlign.center)),
         ),
       ))),
     ])),
@@ -219,20 +219,39 @@ class _DeepLinkLandingScreenState extends State<DeepLinkLandingScreen> {
   @override
   void initState() {
     super.initState();
+    _loading = false;
     _loadLinkedContent();
   }
 
+  @override
+  void didUpdateWidget(DeepLinkLandingScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.uri != widget.uri) {
+      _chatPoll?.cancel();
+      _video?.dispose();
+      _video = null;
+      _session = null;
+      _match = null;
+      _chatMessages = [];
+      _loading = false;
+      _loadLinkedContent();
+    }
+  }
+
   Future<void> _loadLinkedContent() async {
+    if (mounted) setState(() => _loading = false);
     try {
       if (_isStream) {
+        _loadChat();
+        _chatPoll?.cancel();
+        _chatPoll = Timer.periodic(const Duration(milliseconds: 250), (_) => _loadChat());
         final response = await http.get(Uri.parse('${ApiService.cleanBaseUrl}/api/v1/costream/${Uri.encodeComponent(_id)}'))
             .timeout(const Duration(seconds: 4));
         if (response.statusCode == 200) {
           _session = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
           final url = _session?['composite_playback_url']?.toString();
-          if (url != null && url.isNotEmpty) await _initializeVideo(_localMediaUrl(url));
+          if (url != null && url.isNotEmpty) _initializeVideo(_localMediaUrl(url));
           _loadChat();
-          _chatPoll = Timer.periodic(const Duration(seconds: 1), (_) => _loadChat());
         } else {
           _notice = 'This co-stream is not available yet.';
         }
@@ -246,7 +265,7 @@ class _DeepLinkLandingScreenState extends State<DeepLinkLandingScreen> {
           if (stream.statusCode == 200) {
             final data = jsonDecode(stream.body) as Map;
             final url = data['playback_url']?.toString();
-            if (url != null && url.isNotEmpty) await _initializeVideo(_localMediaUrl(url));
+            if (url != null && url.isNotEmpty) _initializeVideo(_localMediaUrl(url));
           }
         } else {
           _notice = 'This match is not available right now.';
@@ -260,7 +279,7 @@ class _DeepLinkLandingScreenState extends State<DeepLinkLandingScreen> {
   }
 
   Future<void> _loadChat() async {
-    final room = _session?['chat_room_id']?.toString();
+    final room = _session?['chat_room_id']?.toString() ?? (_isStream ? 'chat-$_id' : null);
     if (room == null || room.isEmpty) return;
     try {
       final response = await http.get(Uri.parse('${ApiService.cleanBaseUrl}/api/v1/chat/${Uri.encodeComponent(room)}/messages'))
@@ -318,7 +337,7 @@ class _DeepLinkLandingScreenState extends State<DeepLinkLandingScreen> {
           const SizedBox(height: 10),
           Text('${_match?['home']?['team_id'] ?? 'Home'}  ${home ?? 0} - ${away ?? 0}  ${_match?['away']?['team_id'] ?? 'Away'}', style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700)),
         ],
-        if (_isStream && _session != null) ...[
+        if (_isStream) ...[
           const SizedBox(height: 10),
           Text('Session ${_session?['session_id'] ?? _id} · ${_session?['participant_count'] ?? 0} participants'),
           const SizedBox(height: 16),
