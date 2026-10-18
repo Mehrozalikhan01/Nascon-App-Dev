@@ -90,7 +90,9 @@ class StoreService:
             return {
                 "variant_id": variant_id,
                 "stock": self._stock.get(variant_id, 0),
-                "reserved": self._reserved.get(variant_id, 0)
+                "reserved": self._reserved.get(variant_id, 0),
+                "price_minor": self._variants[variant_id]["price_minor"],
+                "currency": self._variants[variant_id]["currency"],
             }
 
     def checkout(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -113,7 +115,7 @@ class StoreService:
         token = payment.get("token")
 
         # 1. Validation Order: 1) 400 Schema/Malformed
-        valid_id = lambda value: isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", value) is not None
+        valid_id = lambda value: isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,64}", value) is not None
         if not valid_id(order_id):
             return {"error": "VALIDATION_ERROR", "fields": ["order_id"]}
         if not valid_id(customer_id):

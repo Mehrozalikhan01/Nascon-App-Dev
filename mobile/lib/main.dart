@@ -3,7 +3,11 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:video_player/video_player.dart';
 import 'services/api_service.dart';
+
+const MethodChannel _deepLinkChannel = MethodChannel('nascon.deep_links');
 
 String _utcTimestamp(DateTime value) {
   final utc = value.toUtc();
@@ -19,11 +23,18 @@ void main() async {
   } catch (e) {
     debugPrint("Init error: $e");
   }
-  runApp(const NasconLeagueApp());
+  String? initialLink;
+  try {
+    initialLink = await _deepLinkChannel.invokeMethod<String>('initialLink');
+  } catch (_) {
+    // Web, desktop, and older installed builds do not expose the Android channel.
+  }
+  runApp(NasconLeagueApp(initialLink: initialLink));
 }
 
 class NasconLeagueApp extends StatelessWidget {
-  const NasconLeagueApp({super.key});
+  final String? initialLink;
+  const NasconLeagueApp({super.key, this.initialLink});
 
   @override
   Widget build(BuildContext context) {
@@ -74,7 +85,257 @@ class NasconLeagueApp extends StatelessWidget {
           )),
         ),
       ),
-      home: const AuthGate(),
+      home: DeepLinkRouter(initialLink: initialLink),
+    );
+  }
+}
+
+class DeepLinkRouter extends StatefulWidget {
+  final String? initialLink;
+  const DeepLinkRouter({super.key, this.initialLink});
+
+  @override
+  State<DeepLinkRouter> createState() => _DeepLinkRouterState();
+}
+
+class _DeepLinkRouterState extends State<DeepLinkRouter> {
+  Uri? _link;
+
+  @override
+  void initState() {
+    super.initState();
+    _link = _parseLink(widget.initialLink);
+    _deepLinkChannel.setMethodCallHandler((call) async {
+      if (call.method == 'onLink' && call.arguments is String) {
+        final next = _parseLink(call.arguments as String);
+        if (next != null && mounted) setState(() => _link = next);
+      }
+    });
+  }
+
+  Uri? _parseLink(String? value) {
+    if (value == null) return null;
+    final uri = Uri.tryParse(value);
+    return uri?.scheme == 'nascon' ? uri : null;
+  }
+
+  @override
+  Widget build(BuildContext context) => _link == null
+      ? const AuthGate()
+      : DeepLinkLandingScreen(uri: _link!);
+}
+
+class DeepLinkLandingScreen extends StatefulWidget {
+  final Uri uri;
+  const DeepLinkLandingScreen({super.key, required this.uri});
+
+  @override
+  State<DeepLinkLandingScreen> createState() => _DeepLinkLandingScreenState();
+}
+
+class QrScannerScreen extends StatefulWidget {
+  const QrScannerScreen({super.key});
+
+  @override
+  State<QrScannerScreen> createState() => _QrScannerScreenState();
+}
+
+class _QrScannerScreenState extends State<QrScannerScreen> {
+  bool _opening = false;
+
+  Future<void> _openCode(String value) async {
+    if (_opening) return;
+    _opening = true;
+    try {
+      final scanned = Uri.tryParse(value.trim());
+      if (scanned == null) throw const FormatException('This QR code is not a supported NaSCon link.');
+      Uri? destination;
+      if (scanned.scheme == 'nascon' && (scanned.host == 'entity' || scanned.host == 'stream')) {
+        destination = scanned;
+      } else if (scanned.pathSegments.length >= 2 && scanned.pathSegments.first == 'q') {
+        final api = Uri.parse(ApiService.cleanBaseUrl);
+        final request = http.Request('GET', api.replace(path: '/q/${scanned.pathSegments[1]}'))..followRedirects = false;
+        final client = http.Client();
+        final response = await client.send(request).timeout(const Duration(seconds: 5));
+        client.close();
+        final location = response.headers['location'];
+        if (location != null) {
+          final route = api.resolve(location);
+          final segments = route.pathSegments;
+          if (segments.length >= 3 && segments[0] == 'web' && segments[1] == 'matches') {
+            destination = Uri(scheme: 'nascon', host: 'entity', path: '/${segments[2]}');
+          } else if (segments.length >= 3 && segments[0] == 'web' && segments[1] == 'costream') {
+            destination = Uri(scheme: 'nascon', host: 'stream', path: '/${segments[2]}');
+          } else if (segments.length >= 3 && segments[0] == 'web' && segments[1] == 'players') {
+            destination = Uri(scheme: 'nascon', host: 'entity', path: '/${segments[2]}');
+          }
+        }
+      }
+      if (destination == null) throw const FormatException('This QR code does not point to a supported NaSCon match or stream.');
+      if (!mounted) return;
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => DeepLinkLandingScreen(uri: destination!)));
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error is FormatException ? error.message : 'Could not resolve that QR code. Check the server connection.')));
+      }
+    } finally {
+      _opening = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Scan NaSCon QR')),
+    body: SafeArea(child: Column(children: [
+      const Padding(padding: EdgeInsets.all(18), child: Text('Scan a match, player, club, or co-stream code to open it in NaSCon.', textAlign: TextAlign.center)),
+      Expanded(child: Padding(padding: const EdgeInsets.all(18), child: ClipRRect(
+        borderRadius: BorderRadius.circular(20),
+        child: MobileScanner(
+          onDetect: (capture) {
+            for (final barcode in capture.barcodes) {
+              final value = barcode.rawValue;
+              if (value != null && value.isNotEmpty) { _openCode(value); break; }
+            }
+          },
+          errorBuilder: (context, error, child) => Center(child: Text('Camera unavailable: ${error.errorCode.name}', textAlign: TextAlign.center)),
+        ),
+      ))),
+    ])),
+  );
+}
+
+class _DeepLinkLandingScreenState extends State<DeepLinkLandingScreen> {
+  VideoPlayerController? _video;
+  Map<String, dynamic>? _match;
+  Map<String, dynamic>? _session;
+  List<Map<String, dynamic>> _chatMessages = [];
+  Timer? _chatPoll;
+  String? _notice;
+  bool _loading = true;
+
+  String get _id => widget.uri.pathSegments.isEmpty ? '' : widget.uri.pathSegments.last;
+  bool get _isStream => widget.uri.host == 'stream';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLinkedContent();
+  }
+
+  Future<void> _loadLinkedContent() async {
+    try {
+      if (_isStream) {
+        final response = await http.get(Uri.parse('${ApiService.cleanBaseUrl}/api/v1/costream/${Uri.encodeComponent(_id)}'))
+            .timeout(const Duration(seconds: 4));
+        if (response.statusCode == 200) {
+          _session = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
+          final url = _session?['composite_playback_url']?.toString();
+          if (url != null && url.isNotEmpty) await _initializeVideo(_localMediaUrl(url));
+          _loadChat();
+          _chatPoll = Timer.periodic(const Duration(seconds: 1), (_) => _loadChat());
+        } else {
+          _notice = 'This co-stream is not available yet.';
+        }
+      } else {
+        final response = await http.get(Uri.parse('${ApiService.cleanBaseUrl}/audit/v1/score/${Uri.encodeComponent(_id)}'))
+            .timeout(const Duration(seconds: 4));
+        if (response.statusCode == 200) {
+          _match = Map<String, dynamic>.from(jsonDecode(response.body) as Map);
+          final stream = await http.get(Uri.parse('${ApiService.cleanBaseUrl}/api/v1/matches/${Uri.encodeComponent(_id)}/playback'))
+              .timeout(const Duration(seconds: 4));
+          if (stream.statusCode == 200) {
+            final data = jsonDecode(stream.body) as Map;
+            final url = data['playback_url']?.toString();
+            if (url != null && url.isNotEmpty) await _initializeVideo(_localMediaUrl(url));
+          }
+        } else {
+          _notice = 'This match is not available right now.';
+        }
+      }
+    } catch (_) {
+      _notice = 'Connect to the event server to load this live screen.';
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _loadChat() async {
+    final room = _session?['chat_room_id']?.toString();
+    if (room == null || room.isEmpty) return;
+    try {
+      final response = await http.get(Uri.parse('${ApiService.cleanBaseUrl}/api/v1/chat/${Uri.encodeComponent(room)}/messages'))
+          .timeout(const Duration(seconds: 2));
+      if (response.statusCode == 200 && mounted) {
+        final data = jsonDecode(response.body) as Map;
+        final items = (data['items'] as List? ?? const []).whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList();
+        setState(() => _chatMessages = items);
+      }
+    } catch (_) {}
+  }
+
+  Uri _localMediaUrl(String value) {
+    final remote = Uri.parse(value);
+    final api = Uri.parse(ApiService.cleanBaseUrl);
+    return remote.replace(scheme: api.scheme, host: api.host, port: 8888);
+  }
+
+  Future<void> _initializeVideo(Uri url) async {
+    final controller = VideoPlayerController.networkUrl(url);
+    await controller.initialize().timeout(const Duration(seconds: 5));
+    if (!mounted) {
+      await controller.dispose();
+      return;
+    }
+    setState(() => _video = controller);
+  }
+
+  @override
+  void dispose() {
+    _chatPoll?.cancel();
+    _video?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final home = _match?['home'] is Map ? (_match!['home'] as Map)['score'] : null;
+    final away = _match?['away'] is Map ? (_match!['away'] as Map)['score'] : null;
+    final title = _isStream ? 'Co-stream' : 'Match Live';
+    return Scaffold(
+      appBar: AppBar(title: Text(title), leading: IconButton(tooltip: 'Back to account', icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.of(context).maybePop())),
+      body: SafeArea(child: ListView(padding: const EdgeInsets.all(18), children: [
+        Container(
+          constraints: const BoxConstraints(minHeight: 220),
+          decoration: BoxDecoration(color: const Color(0xFF071322), borderRadius: BorderRadius.circular(18)),
+          clipBehavior: Clip.antiAlias,
+          child: _video?.value.isInitialized == true
+              ? AspectRatio(aspectRatio: _video!.value.aspectRatio, child: Stack(alignment: Alignment.bottomCenter, children: [VideoPlayer(_video!), VideoProgressIndicator(_video!, allowScrubbing: true)]))
+              : const Center(child: Icon(Icons.sports_soccer, color: Colors.white70, size: 58)),
+        ),
+        const SizedBox(height: 20),
+        Text(title, style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w800, color: Color(0xFF10284B))),
+        if (!_isStream && _match != null) ...[
+          const SizedBox(height: 10),
+          Text('${_match?['home']?['team_id'] ?? 'Home'}  ${home ?? 0} - ${away ?? 0}  ${_match?['away']?['team_id'] ?? 'Away'}', style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w700)),
+        ],
+        if (_isStream && _session != null) ...[
+          const SizedBox(height: 10),
+          Text('Session ${_session?['session_id'] ?? _id} · ${_session?['participant_count'] ?? 0} participants'),
+          const SizedBox(height: 16),
+          const Text('Live chat', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+          ..._chatMessages.map((message) => ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: Text(message['sender']?.toString() ?? 'Fan'),
+            subtitle: Text(message['text']?.toString() ?? ''),
+          )),
+        ],
+        if (_loading) const Padding(padding: EdgeInsets.only(top: 18), child: LinearProgressIndicator()),
+        if (_notice != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(_notice!, style: const TextStyle(color: Color(0xFF596579)))),
+        const SizedBox(height: 16),
+        FilledButton.icon(onPressed: _video?.value.isInitialized == true ? () => setState(() => _video!.value.isPlaying ? _video!.pause() : _video!.play()) : null,
+          icon: Icon(_video?.value.isPlaying == true ? Icons.pause : Icons.play_arrow), label: Text(_video?.value.isPlaying == true ? 'Pause stream' : 'Play stream')),
+      ])),
     );
   }
 }
@@ -107,6 +368,8 @@ class _AuthGateState extends State<AuthGate> {
         if (res.statusCode == 200) {
           final user = Map<String, dynamic>.from(jsonDecode(res.body) as Map);
           ApiService.currentRole = user["role"]?.toString() ?? ApiService.currentRole;
+          ApiService.currentTenantId = user["tenant_id"]?.toString() ?? ApiService.currentTenantId;
+          ApiService.currentUserId = user["user_id"]?.toString() ?? ApiService.currentUserId;
           _signedIn = true;
         } else {
           await ApiService.logout();
@@ -199,7 +462,8 @@ class _LoginScreenState extends State<LoginScreen> {
     } on TimeoutException {
       if (mounted) setState(() => _error = "The server did not answer in time. Check the server address and try again.");
     } catch (e) {
-      if (mounted) setState(() => _error = "Sign in failed: $e (Server: ${ApiService.baseUrl})");
+      debugPrint("Sign-in request failed: $e");
+      if (mounted) setState(() => _error = "Could not sign in. Check the server address and try again.");
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -274,8 +538,8 @@ class _LoginScreenState extends State<LoginScreen> {
                   onPressed: () => controller.text = "http://10.0.2.2:8080",
                 ),
                 ActionChip(
-                  label: const Text("LAN (172.15.4.12)"),
-                  onPressed: () => controller.text = "http://172.15.4.12:8080",
+                  label: const Text("LAN example (192.168.1.20)"),
+                  onPressed: () => controller.text = "http://192.168.1.20:8080",
                 ),
               ],
             ),
@@ -544,6 +808,9 @@ class EmptyState extends StatelessWidget {
 
 String explainApiError(String code) {
   switch (code) {
+    case "UNAUTHENTICATED": return "Your session expired. Sign in again and retry.";
+    case "FORBIDDEN": return "Your account does not have permission for this action.";
+    case "VALIDATION_ERROR": return "Review the details and correct any missing or invalid fields.";
     case "MATCH_NOT_FOUND": return "That match could not be found. Refresh fixtures and try again.";
     case "MATCH_NOT_IN_PROGRESS": return "This match is not live yet. Start the match before recording a score.";
     case "ILLEGAL_TRANSITION": return "That action is not allowed for the match's current status.";
@@ -563,6 +830,8 @@ String explainApiError(String code) {
     default: return "The server could not apply this action. Review the latest details and try again.";
   }
 }
+
+bool isCurrentScoringRole(String role) => role == "league_organizer" || role == "super_admin";
 
 class ConnectionBadge extends StatelessWidget {
   final bool online;
@@ -594,17 +863,22 @@ class MainNavigationScreen extends StatefulWidget {
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
+  String _selectedTenantId = "tenant-alpha";
   bool _isOnline = false;
   bool _checkingStatus = true;
   bool _syncing = false;
   bool _statusCheckInProgress = false;
   int _pendingCount = 0;
   List<Map<String, dynamic>> _pendingActions = [];
+  List<Map<String, dynamic>> _syncHistory = [];
   Timer? _statusTimer;
 
   @override
   void initState() {
     super.initState();
+    if (ApiService.currentTenantId != "global") {
+      _selectedTenantId = ApiService.currentTenantId;
+    }
     _checkStatus();
     _statusTimer = Timer.periodic(const Duration(seconds: 4), (_) => _checkStatus());
   }
@@ -620,9 +894,11 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     _statusCheckInProgress = true;
     var online = false;
     var queue = <Map<String, dynamic>>[];
+    var history = <Map<String, dynamic>>[];
     try {
       online = await ApiService.checkHealth();
       queue = await ApiService.getPendingQueue();
+      history = await ApiService.getSyncHistory();
     } catch (_) {
       // Keep the connection badge available even if local storage is damaged.
     } finally {
@@ -632,6 +908,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           _isOnline = online;
           _pendingActions = queue;
           _pendingCount = queue.length;
+          _syncHistory = history;
           _checkingStatus = false;
         });
       }
@@ -697,25 +974,42 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     }
   }
 
+  Future<void> _clearSyncHistory() async {
+    await ApiService.clearSyncHistory();
+    if (mounted) setState(() => _syncHistory = []);
+  }
+
   @override
   Widget build(BuildContext context) {
     final screens = [
-      FixturesScreen(isOnline: _isOnline, onOpenStore: () => setState(() => _currentIndex = 2)),
-      StandingsScreen(isOnline: _isOnline),
+      FixturesScreen(key: ValueKey("fixtures-$_selectedTenantId"), isOnline: _isOnline, tenantId: _selectedTenantId,
+        onOpenStore: () => setState(() => _currentIndex = 2)),
+      StandingsScreen(key: ValueKey("standings-$_selectedTenantId"), isOnline: _isOnline, tenantId: _selectedTenantId),
       StoreScreen(isOnline: _isOnline),
-      ClubProfileScreen(isOnline: _isOnline),
+      ClubProfileScreen(key: ValueKey("club-$_selectedTenantId"), isOnline: _isOnline, tenantId: _selectedTenantId),
       AccountScreen(
-        onRoleChanged: () { setState(() {}); _checkStatus(); },
+        onRoleChanged: () {
+          setState(() {
+            if (ApiService.currentTenantId != "global") _selectedTenantId = ApiService.currentTenantId;
+          });
+          _checkStatus();
+        },
+        tenantId: _selectedTenantId,
+        onTenantChanged: (tenant) => setState(() => _selectedTenantId = tenant),
         isOnline: _isOnline,
         pendingCount: _pendingCount,
         pendingActions: _pendingActions,
+        syncHistory: _syncHistory,
         onSync: _performSync,
+        onClearHistory: _clearSyncHistory,
         onLogout: widget.onLogout,
       ),
     ];
 
+    final tenantPrimary = _selectedTenantId == "tenant-beta" ? const Color(0xFF4F3975) : const Color(0xFF10284B);
     return Scaffold(
       appBar: AppBar(
+        backgroundColor: tenantPrimary,
         leading: Padding(
           padding: const EdgeInsets.all(8.0),
             child: const BrandMark(size: 38),
@@ -723,7 +1017,10 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         title: const Text("NaSCon '26\nLeague & Club Ops", style: TextStyle(fontSize: 16, height: 1.05, fontWeight: FontWeight.w700)),
         actions: [
           // Offline / Online Status Badge
-          Container(
+          InkWell(
+            borderRadius: BorderRadius.circular(22),
+            onTap: () => setState(() => _currentIndex = 4),
+            child: Container(
             margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(
@@ -759,12 +1056,19 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
                 ]
               ],
             ),
-          ),
+          )),
         ],
       ),
       body: screens[_currentIndex],
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const QrScannerScreen())),
+        icon: const Icon(Icons.qr_code_scanner),
+        label: const Text('Scan QR'),
+        tooltip: 'Scan a match, player, club, or stream QR code',
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
+        indicatorColor: _selectedTenantId == "tenant-beta" ? const Color(0xFFEDE5F7) : const Color(0xFFE7EEF5),
         onDestinationSelected: (idx) => setState(() => _currentIndex = idx),
         destinations: const [
           NavigationDestination(icon: Icon(Icons.sports_soccer), label: "Fixtures"),
@@ -783,8 +1087,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 // ==========================================
 class FixturesScreen extends StatefulWidget {
   final bool isOnline;
+  final String tenantId;
   final VoidCallback onOpenStore;
-  const FixturesScreen({super.key, required this.isOnline, required this.onOpenStore});
+  const FixturesScreen({super.key, required this.isOnline, required this.tenantId, required this.onOpenStore});
 
   @override
   State<FixturesScreen> createState() => _FixturesScreenState();
@@ -792,7 +1097,10 @@ class FixturesScreen extends StatefulWidget {
 
 class _FixturesScreenState extends State<FixturesScreen> {
   List<dynamic> _fixtures = [];
+  List<String> _leagueIds = const [];
   Map<String, dynamic> _teamNames = {};
+  String _selectedLeagueId = "league-alpha-1";
+  String _statusFilter = "all";
   bool _loading = true;
   String? _loadMessage;
 
@@ -810,11 +1118,18 @@ class _FixturesScreenState extends State<FixturesScreen> {
 
   Future<void> _loadFixtures() async {
     if (mounted) setState(() { _loading = true; _loadMessage = null; });
-    final data = await ApiService.loadOverview(online: widget.isOnline);
+    final data = await ApiService.loadOverview(online: widget.isOnline, tenantId: widget.tenantId, leagueId: _selectedLeagueId);
     final fixtures = data["fixtures"];
+    final leagueIds = data["league_ids"] is List
+        ? (data["league_ids"] as List).map((value) => value.toString()).toList()
+        : <String>[];
     if (mounted) {
       setState(() {
         _fixtures = fixtures is List ? fixtures : [];
+        _leagueIds = leagueIds;
+        if (_leagueIds.isNotEmpty && !_leagueIds.contains(_selectedLeagueId)) {
+          _selectedLeagueId = _leagueIds.first;
+        }
         _teamNames = data["team_names"] is Map ? Map<String, dynamic>.from(data["team_names"] as Map) : {};
         _loading = false;
         if (_fixtures.isEmpty) {
@@ -838,6 +1153,13 @@ class _FixturesScreenState extends State<FixturesScreen> {
         ]),
       );
     }
+    final visibleFixtures = _fixtures.where((dynamic fixture) {
+      final status = fixture is Map ? fixture["status"]?.toString() : null;
+      if (_statusFilter == "live") return status == "in_progress";
+      if (_statusFilter == "upcoming") return status == "scheduled";
+      if (_statusFilter == "completed") return status == "completed";
+      return true;
+    }).toList();
     return RefreshIndicator(
       onRefresh: _loadFixtures,
       child: ListView(
@@ -846,8 +1168,39 @@ class _FixturesScreenState extends State<FixturesScreen> {
           const Text("Fixtures", style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: Color(0xFF10284B))),
           const SizedBox(height: 4),
           Text("Live scores and upcoming matches", style: TextStyle(color: Colors.blueGrey[600])),
+          if (_leagueIds.length > 1) ...[
+            const SizedBox(height: 14),
+            DropdownButtonFormField<String>(
+              isExpanded: true,
+              initialValue: _leagueIds.contains(_selectedLeagueId) ? _selectedLeagueId : _leagueIds.first,
+              decoration: const InputDecoration(labelText: "Competition", prefixIcon: Icon(Icons.emoji_events_outlined)),
+              items: _leagueIds.map((id) => DropdownMenuItem(value: id, child: Text(id.replaceAll("-", " ").toUpperCase()))).toList(),
+              onChanged: (value) {
+                if (value == null) return;
+                setState(() => _selectedLeagueId = value);
+                _loadFixtures();
+              },
+            ),
+          ],
+          const SizedBox(height: 12),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(children: [
+              for (final filter in const ["all", "live", "upcoming", "completed"])
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    label: Text(filter[0].toUpperCase() + filter.substring(1)),
+                    selected: _statusFilter == filter,
+                    onSelected: (_) => setState(() => _statusFilter = filter),
+                  ),
+                ),
+            ]),
+          ),
           const SizedBox(height: 16),
-          ..._fixtures.map((dynamic f) {
+          if (visibleFixtures.isEmpty)
+            EmptyState(icon: Icons.filter_list_off, title: "No matching fixtures", message: "Try another status filter or competition."),
+          ...visibleFixtures.map((dynamic f) {
             final home = Map<String, dynamic>.from(f["home"] as Map);
             final away = Map<String, dynamic>.from(f["away"] as Map);
             final homeName = _teamNames[home["team_id"]]?.toString() ?? home["team_id"].toString();
@@ -955,13 +1308,56 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
       if (mounted && reachable != _isOnline) setState(() => _isOnline = reachable);
       if (!reachable) return;
       final matchId = _match["match_id"];
-      final response = await http.get(Uri.parse("${ApiService.baseUrl}/audit/v1/score/$matchId"))
-          .timeout(const Duration(seconds: 4));
-      if (response.statusCode == 200 && mounted) {
-        setState(() => _match = jsonDecode(response.body));
+      final response = await ApiService.fetchJson(
+        "/audit/v1/score/${Uri.encodeComponent(matchId.toString())}",
+        cacheKey: "score_$matchId",
+        online: true,
+      );
+      if (response != null && mounted) {
+        setState(() => _match = response);
       }
     } catch (_) {
       // Keep showing the last known score when the connection drops.
+    }
+  }
+
+  Future<void> _recordMatchLifecycleEvent(String eventType) async {
+    if (!isCurrentScoringRole(ApiService.currentRole) || !_isOnline) return;
+    if (eventType == "match_end") {
+      final shouldEnd = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text("End this match?"),
+          content: const Text("This finalizes the current score. Review the match timeline before confirming."),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text("Keep live")),
+            FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text("End match")),
+          ],
+        ),
+      );
+      if (shouldEnd != true || !mounted) return;
+    }
+    try {
+      final response = await http.post(
+        Uri.parse("${ApiService.cleanBaseUrl}/audit/v1/events"),
+        headers: ApiService.authHeaders,
+        body: jsonEncode({
+          "event_id": "evt-${DateTime.now().microsecondsSinceEpoch}",
+          "match_id": _match["match_id"],
+          "type": eventType,
+          "payload": <String, dynamic>{},
+        }),
+      ).timeout(const Duration(seconds: 8));
+      final decoded = response.body.isEmpty ? <String, dynamic>{} : jsonDecode(response.body);
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        await _refreshMatch();
+        return;
+      }
+      final error = decoded is Map ? decoded["error"] : null;
+      final code = error is Map ? error["code"]?.toString() ?? "VALIDATION_ERROR" : "VALIDATION_ERROR";
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(explainApiError(code))));
+    } catch (_) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Could not reach the match server. No lifecycle change was confirmed.")));
     }
   }
 
@@ -976,6 +1372,8 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
     final homeName = teamNames[home["team_id"]]?.toString() ?? home["team_id"].toString();
     final awayName = teamNames[away["team_id"]]?.toString() ?? away["team_id"].toString();
     final events = match["events"] is List ? List<dynamic>.from(match["events"] as List) : <dynamic>[];
+    final matchStatus = match["status"]?.toString() ?? "scheduled";
+    final canScore = isCurrentScoringRole(ApiService.currentRole);
     return Scaffold(
       appBar: AppBar(
         title: Text("Match ${match['match_id']}"),
@@ -1006,7 +1404,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
                     ),
                     const SizedBox(height: 4),
                     Chip(
-                      label: Text(match['status'].toUpperCase()),
+                      label: Text(matchStatus.replaceAll("_", " ").toUpperCase()),
                       backgroundColor: const Color(0xFFE4B557),
                     )
                   ],
@@ -1052,31 +1450,35 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
               ),
             ),
             const SizedBox(height: 16),
-            if (ApiService.currentRole == "league_organizer" || ApiService.currentRole == "super_admin") ...[
-              ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.teal[800],
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.all(14),
-                ),
+            if (canScore && matchStatus == "scheduled")
+              FilledButton.icon(
+                onPressed: isOnline ? () => _recordMatchLifecycleEvent("match_start") : null,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text("Start match"),
+                style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+              ),
+            if (canScore && matchStatus == "in_progress") ...[
+              FilledButton.icon(
+                style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48), backgroundColor: const Color(0xFF08775E), foregroundColor: Colors.white),
                 icon: const Icon(Icons.scoreboard),
-                label: const Text("Organizer: Enter Match Scoring"),
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => ScoringEntryScreen(matchId: match['match_id'],
-                        homeTeamId: home['team_id'].toString(), awayTeamId: away['team_id'].toString(),
-                        baseVersion: match['version'] as int? ?? 0,
-                        compensatableEventIds: events.where((event) => event is Map &&
-                          ["score", "discipline", "tiebreak_winner"].contains(event["type"]) && event["compensated"] != true)
-                          .map((event) => (event as Map)["event_id"].toString()).toList(),
-                        isOnline: isOnline),
-                    ),
-                  );
-                },
-              )
-            ]
+                label: const Text("Enter match scoring"),
+                onPressed: () => Navigator.push(context, MaterialPageRoute(
+                  builder: (_) => ScoringEntryScreen(matchId: match['match_id'],
+                    homeTeamId: home['team_id'].toString(), awayTeamId: away['team_id'].toString(),
+                    baseVersion: match['version'] as int? ?? 0,
+                    compensatableEventIds: events.where((event) => event is Map &&
+                      ["score", "discipline", "tiebreak_winner"].contains(event["type"]) && event["compensated"] != true)
+                      .map((event) => (event as Map)["event_id"].toString()).toList(),
+                    isOnline: isOnline),
+                )),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: isOnline ? () => _recordMatchLifecycleEvent("match_end") : null,
+                icon: const Icon(Icons.flag_outlined),
+                label: const Text("End match"),
+              ),
+            ],
           ],
         ),
       ),
@@ -1089,7 +1491,8 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
 // ==========================================
 class StandingsScreen extends StatefulWidget {
   final bool isOnline;
-  const StandingsScreen({super.key, required this.isOnline});
+  final String tenantId;
+  const StandingsScreen({super.key, required this.isOnline, required this.tenantId});
 
   @override
   State<StandingsScreen> createState() => _StandingsScreenState();
@@ -1098,6 +1501,9 @@ class StandingsScreen extends StatefulWidget {
 class _StandingsScreenState extends State<StandingsScreen> {
   List<dynamic> _table = [];
   Map<String, dynamic> _teamNames = {};
+  Map<String, dynamic> _h2h = {};
+  List<String> _leagueIds = const [];
+  String _selectedLeagueId = "league-alpha-1";
   int? _qualificationSpots;
   bool _loading = true;
   String? _loadMessage;
@@ -1116,13 +1522,22 @@ class _StandingsScreenState extends State<StandingsScreen> {
 
   Future<void> _loadStandings() async {
     if (mounted) setState(() { _loading = true; _loadMessage = null; });
-    final data = await ApiService.loadOverview(online: widget.isOnline);
+    final data = await ApiService.loadOverview(online: widget.isOnline, tenantId: widget.tenantId, leagueId: _selectedLeagueId);
     final standings = data["standings"];
     final table = standings is Map ? standings["table"] : null;
     if (mounted) {
       setState(() {
         _table = table is List ? table : [];
         _teamNames = data["team_names"] is Map ? Map<String, dynamic>.from(data["team_names"] as Map) : {};
+        _h2h = standings is Map && standings["h2h"] is Map
+            ? Map<String, dynamic>.from(standings["h2h"] as Map)
+            : {};
+        _leagueIds = data["league_ids"] is List
+            ? (data["league_ids"] as List).map((value) => value.toString()).toList()
+            : <String>[];
+        if (_leagueIds.isNotEmpty && !_leagueIds.contains(_selectedLeagueId)) {
+          _selectedLeagueId = _leagueIds.first;
+        }
         _qualificationSpots = standings is Map ? (standings["qualification_spots"] as num?)?.toInt() : null;
         _loading = false;
         if (_table.isEmpty) {
@@ -1138,6 +1553,38 @@ class _StandingsScreenState extends State<StandingsScreen> {
     if (status == "clinched") return Colors.green[700]!;
     if (status == "eliminated") return Colors.red[700]!;
     return Colors.blue[700]!;
+  }
+
+  Future<void> _showHeadToHead(Map<String, dynamic> row) async {
+    final teamId = row["team_id"]?.toString() ?? "";
+    final opponents = _h2h[teamId] is Map
+        ? Map<String, dynamic>.from(_h2h[teamId] as Map)
+        : <String, dynamic>{};
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text("${_teamNames[teamId] ?? teamId} · Head to head", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 12),
+            if (opponents.isEmpty) const Text("No head-to-head records are available yet."),
+            ...opponents.entries.where((entry) => entry.key != teamId).map((entry) {
+              final stats = entry.value is Map ? Map<String, dynamic>.from(entry.value as Map) : <String, dynamic>{};
+              final scored = stats["scored"] ?? 0;
+              final conceded = stats["conceded"] ?? 0;
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(_teamNames[entry.key]?.toString() ?? entry.key),
+                subtitle: Text("${stats['played'] ?? 0} played · ${stats['points'] ?? 0} points"),
+                trailing: Text("$scored – $conceded", style: const TextStyle(fontWeight: FontWeight.w800)),
+              );
+            }),
+          ]),
+        ),
+      ),
+    );
   }
 
   @override
@@ -1159,8 +1606,22 @@ class _StandingsScreenState extends State<StandingsScreen> {
         children: [
           const Text("League table", style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: Color(0xFF10284B))),
           const SizedBox(height: 4),
-          Text("League Alpha${_qualificationSpots == null ? '' : ' · ${_qualificationSpots!} qualifying spots'}",
+          Text("${_selectedLeagueId.replaceAll('-', ' ').toUpperCase()}${_qualificationSpots == null ? '' : ' · ${_qualificationSpots!} qualifying spots'}",
             style: TextStyle(color: Colors.blueGrey[600])),
+          if (_leagueIds.length > 1) ...[
+            const SizedBox(height: 14),
+            DropdownButtonFormField<String>(
+              isExpanded: true,
+              initialValue: _leagueIds.contains(_selectedLeagueId) ? _selectedLeagueId : _leagueIds.first,
+              decoration: const InputDecoration(labelText: "Competition", prefixIcon: Icon(Icons.emoji_events_outlined)),
+              items: _leagueIds.map((id) => DropdownMenuItem(value: id, child: Text(id.replaceAll("-", " ").toUpperCase()))).toList(),
+              onChanged: (value) {
+                if (value == null) return;
+                setState(() => _selectedLeagueId = value);
+                _loadStandings();
+              },
+            ),
+          ],
           const SizedBox(height: 16),
           Card(
             child: SingleChildScrollView(
@@ -1174,6 +1635,11 @@ class _StandingsScreenState extends State<StandingsScreen> {
               DataColumn(label: Text("#")),
               DataColumn(label: Text("Team")),
               DataColumn(label: Text("P")),
+              DataColumn(label: Text("W")),
+              DataColumn(label: Text("D")),
+              DataColumn(label: Text("L")),
+              DataColumn(label: Text("GF")),
+              DataColumn(label: Text("GA")),
               DataColumn(label: Text("Pts")),
               DataColumn(label: Text("Diff")),
               DataColumn(label: Text("Status")),
@@ -1183,8 +1649,13 @@ class _StandingsScreenState extends State<StandingsScreen> {
                 cells: [
                   DataCell(Text("${row['rank']}")),
                   DataCell(Text((_teamNames[row['team_id']]?.toString() ?? row['team_id'].toString()),
-                    style: const TextStyle(fontWeight: FontWeight.bold))),
+                    style: const TextStyle(fontWeight: FontWeight.bold)), onTap: () => _showHeadToHead(Map<String, dynamic>.from(row as Map))),
                   DataCell(Text("${row['played']}")),
+                  DataCell(Text("${row['won']}")),
+                  DataCell(Text("${row['drawn']}")),
+                  DataCell(Text("${row['lost']}")),
+                  DataCell(Text("${row['scored']}")),
+                  DataCell(Text("${row['conceded']}")),
                   DataCell(Text("${row['points']}", style: const TextStyle(fontWeight: FontWeight.bold))),
                   DataCell(Text("${row['diff']}")),
                   DataCell(
@@ -1217,7 +1688,8 @@ class _StandingsScreenState extends State<StandingsScreen> {
 // ==========================================
 class ClubProfileScreen extends StatefulWidget {
   final bool isOnline;
-  const ClubProfileScreen({super.key, required this.isOnline});
+  final String tenantId;
+  const ClubProfileScreen({super.key, required this.isOnline, required this.tenantId});
 
   @override
   State<ClubProfileScreen> createState() => _ClubProfileScreenState();
@@ -1225,6 +1697,8 @@ class ClubProfileScreen extends StatefulWidget {
 
 class _ClubProfileScreenState extends State<ClubProfileScreen> {
   Map<String, dynamic>? _club;
+  List<String> _clubIds = const [];
+  String _selectedClubId = "club-alpha-1";
   bool _loading = true;
 
   @override
@@ -1241,13 +1715,136 @@ class _ClubProfileScreenState extends State<ClubProfileScreen> {
 
   Future<void> _loadClub() async {
     if (mounted) setState(() => _loading = true);
-    final data = await ApiService.loadOverview(online: widget.isOnline);
+    final data = await ApiService.loadOverview(online: widget.isOnline, tenantId: widget.tenantId, clubId: _selectedClubId);
     final club = data["club"];
+    final clubIds = data["club_ids"] is List
+        ? (data["club_ids"] as List).map((value) => value.toString()).toList()
+        : <String>[];
     if (mounted) {
       setState(() {
         _club = club is Map && club.isNotEmpty ? Map<String, dynamic>.from(club) : null;
+        _clubIds = clubIds;
+        if (_clubIds.isNotEmpty && !_clubIds.contains(_selectedClubId)) {
+          _selectedClubId = _clubIds.first;
+        }
         _loading = false;
       });
+    }
+  }
+
+  Future<void> _showPlayerHistory(Map<String, dynamic> player) async {
+    final playerId = player["player_id"]?.toString() ?? "";
+    if (playerId.isEmpty) return;
+    final historyData = await ApiService.fetchJson(
+      "/audit/v1/roster/history/${Uri.encodeComponent(playerId)}?as_of=${DateTime.now().toUtc().toIso8601String().substring(0, 10)}",
+      cacheKey: "roster_history_${ApiService.currentEmail}_$playerId",
+      online: widget.isOnline,
+    );
+    if (!mounted) return;
+    final history = historyData?["history"] is List ? List<dynamic>.from(historyData!["history"] as List) : <dynamic>[];
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(player["name"]?.toString() ?? "Player profile", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text("${player['position'] ?? 'Player'} · ${player['role'] ?? 'squad member'}", style: TextStyle(color: Colors.blueGrey[600])),
+            if (player["is_on_loan"] == true) ...[
+              const SizedBox(height: 8),
+              Text("On loan · returns ${player['loan_end_date'] ?? 'date not set'}", style: const TextStyle(color: Color(0xFF8A5A13), fontWeight: FontWeight.w700)),
+            ],
+            if (ApiService.currentRole == "player" && ApiService.currentUserId == playerId) ...[
+              const SizedBox(height: 10),
+              FilledButton.tonalIcon(
+                onPressed: widget.isOnline ? () {
+                  Navigator.pop(context);
+                  _editPlayerProfile(player);
+                } : null,
+                icon: const Icon(Icons.edit_outlined),
+                label: Text(widget.isOnline ? "Edit my profile" : "Connect to edit profile"),
+              ),
+            ],
+            const SizedBox(height: 12),
+            const Text("Roster history", style: TextStyle(fontWeight: FontWeight.w800)),
+            const SizedBox(height: 6),
+            if (history.isEmpty) Text(widget.isOnline ? "No roster changes recorded." : "No saved roster history is available offline."),
+            ...history.take(8).map((entry) {
+              final item = entry is Map ? Map<String, dynamic>.from(entry) : <String, dynamic>{};
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                leading: const Icon(Icons.history, color: Color(0xFF1CA987)),
+                title: Text((item["action"] ?? item["type"] ?? "Roster change").toString().replaceAll("_", " ").toUpperCase()),
+                subtitle: Text("${item['effective_date'] ?? item['when'] ?? 'Date unavailable'}${item['why'] == null && item['reason'] == null ? '' : ' · ${item['why'] ?? item['reason']}'}"),
+              );
+            }),
+          ]),
+        ),
+      ),
+    );
+    if (widget.isOnline && mounted) _loadClub();
+  }
+
+  Future<void> _editPlayerProfile(Map<String, dynamic> player) async {
+    final playerId = player["player_id"]?.toString() ?? "";
+    final nameController = TextEditingController(text: player["name"]?.toString() ?? "");
+    var position = player["position"]?.toString() ?? "mf";
+    final values = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text("Edit player profile"),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(controller: nameController, maxLength: 80,
+              decoration: const InputDecoration(labelText: "Display name", prefixIcon: Icon(Icons.person_outline))),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              isExpanded: true,
+              initialValue: position,
+              decoration: const InputDecoration(labelText: "Position", prefixIcon: Icon(Icons.sports_soccer)),
+              items: const [
+                DropdownMenuItem(value: "gk", child: Text("Goalkeeper")),
+                DropdownMenuItem(value: "df", child: Text("Defender")),
+                DropdownMenuItem(value: "mf", child: Text("Midfielder")),
+                DropdownMenuItem(value: "fw", child: Text("Forward")),
+              ],
+              onChanged: (value) { if (value != null) setDialogState(() => position = value); },
+            ),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text("Cancel")),
+            FilledButton(onPressed: () => Navigator.pop(dialogContext, {"name": nameController.text.trim(), "position": position}), child: const Text("Save profile")),
+          ],
+        ),
+      ),
+    );
+    nameController.dispose();
+    if (values == null || !mounted) return;
+    if (values["name"]!.length < 2) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Name must contain at least two characters.")));
+      return;
+    }
+    try {
+      final response = await http.patch(
+        Uri.parse("${ApiService.cleanBaseUrl}/audit/v1/players/${Uri.encodeComponent(playerId)}"),
+        headers: ApiService.authHeaders,
+        body: jsonEncode(values),
+      ).timeout(const Duration(seconds: 8));
+      final decoded = response.body.isEmpty ? <String, dynamic>{} : jsonDecode(response.body);
+      if (response.statusCode != 200) {
+        final error = decoded is Map ? decoded["error"] : null;
+        final code = error is Map ? error["code"]?.toString() ?? "VALIDATION_ERROR" : "VALIDATION_ERROR";
+        throw ApiException(code, explainApiError(code));
+      }
+      await _loadClub();
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Player profile updated and added to audit history.")));
+    } on ApiException catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+    } catch (_) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Could not update the profile. Check the server connection and try again.")));
     }
   }
 
@@ -1268,7 +1865,21 @@ class _ClubProfileScreenState extends State<ClubProfileScreen> {
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
+      children: [
+          if (_clubIds.length > 1) ...[
+            DropdownButtonFormField<String>(
+              isExpanded: true,
+              initialValue: _clubIds.contains(_selectedClubId) ? _selectedClubId : _clubIds.first,
+              decoration: const InputDecoration(labelText: "Club", prefixIcon: Icon(Icons.shield_outlined)),
+              items: _clubIds.map((id) => DropdownMenuItem(value: id, child: Text(id.replaceAll("-", " ").toUpperCase()))).toList(),
+              onChanged: (value) {
+                if (value == null) return;
+                setState(() => _selectedClubId = value);
+                _loadClub();
+              },
+            ),
+            const SizedBox(height: 12),
+          ],
           Container(
             padding: const EdgeInsets.all(22),
             decoration: BoxDecoration(
@@ -1307,8 +1918,11 @@ class _ClubProfileScreenState extends State<ClubProfileScreen> {
               FilledButton.tonalIcon(
                 icon: const Icon(Icons.swap_horiz),
                 label: const Text("Manage"),
-                onPressed: () => Navigator.push(context, MaterialPageRoute(
-                  builder: (_) => RosterManagementScreen(isOnline: widget.isOnline))),
+                onPressed: () async {
+                  await Navigator.push(context, MaterialPageRoute(
+                    builder: (_) => RosterManagementScreen(isOnline: widget.isOnline)));
+                  _loadClub();
+                },
               ),
           ]),
           const SizedBox(height: 8),
@@ -1322,6 +1936,7 @@ class _ClubProfileScreenState extends State<ClubProfileScreen> {
               title: Text(p["name"]?.toString() ?? "Player", style: const TextStyle(fontWeight: FontWeight.w700)),
               subtitle: Text("${pos.toUpperCase()} · ${p['role'] ?? 'squad member'}"),
               trailing: const Icon(Icons.chevron_right),
+              onTap: () => _showPlayerHistory(p),
             )));
           }),
         ],
@@ -1344,6 +1959,7 @@ class StoreScreen extends StatefulWidget {
 class _StoreScreenState extends State<StoreScreen> {
   static const MethodChannel _receiptChannel = MethodChannel('nascon.receipt');
   String _selectedVariant = "var-jersey-001-M";
+  int _quantity = 1;
   final TextEditingController _discountCtrl = TextEditingController();
   String _paymentToken = "tok_success";
   bool _processing = false;
@@ -1374,30 +1990,62 @@ class _StoreScreenState extends State<StoreScreen> {
   }
 
   Future<void> _restoreCheckoutDraft() async {
-    final draft = await ApiService.getCheckoutDraft();
+    final pendingOrder = await ApiService.getCheckoutDraft();
+    final draft = pendingOrder ?? await ApiService.getCheckoutCart();
     if (draft == null || !mounted) return;
     final items = draft["items"];
     final payment = draft["payment"];
     setState(() {
-      _checkoutDraft = draft;
+      _checkoutDraft = pendingOrder;
       if (items is List && items.isNotEmpty && items.first is Map) {
         _selectedVariant = (items.first as Map)["variant_id"]?.toString() ?? _selectedVariant;
+        final savedQuantity = (items.first as Map)["quantity"];
+        if (savedQuantity is num && savedQuantity.toInt() > 0) _quantity = savedQuantity.toInt();
       }
       _paymentToken = payment is Map ? payment["token"]?.toString() ?? _paymentToken : _paymentToken;
       _discountCtrl.text = draft["discount_code"]?.toString() ?? "";
-      _checkoutMessage = "A previous order is awaiting confirmation. Retry safely; it uses the same order reference.";
+      if (pendingOrder != null) {
+        _checkoutMessage = "A previous order is awaiting confirmation. Retry safely; it uses the same order reference.";
+      }
     });
   }
 
+  Future<void> _persistCart() async {
+    if (_checkoutDraft != null) return;
+    await ApiService.saveCheckoutCart({
+      "items": [{"variant_id": _selectedVariant, "quantity": _quantity}],
+      "discount_code": _discountCtrl.text.trim().isEmpty ? null : _discountCtrl.text.trim().toUpperCase(),
+      "payment": {"token": _paymentToken},
+    });
+  }
+
+  void _changeQuantity(int delta) {
+    if (_checkoutDraft != null) return;
+    final next = _quantity + delta;
+    if (next < 1 || (_availableStock != null && next > _availableStock!)) return;
+    setState(() => _quantity = next);
+    _persistCart();
+  }
+
   Future<void> _loadInventory() async {
-    if (!widget.isOnline) return;
-    if (mounted) setState(() => _inventoryLoading = true);
+    if (widget.isOnline && mounted) setState(() => _inventoryLoading = true);
     try {
-      final response = await http.get(Uri.parse("${ApiService.baseUrl}/audit/v1/inventory/$_selectedVariant"))
-          .timeout(const Duration(seconds: 6));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        if (mounted) setState(() => _availableStock = (data["stock"] as num?)?.toInt() ?? 0);
+      final data = await ApiService.fetchJson(
+        "/audit/v1/inventory/${Uri.encodeComponent(_selectedVariant)}",
+        cacheKey: "inventory_$_selectedVariant",
+        online: widget.isOnline,
+      );
+      if (data != null && mounted) {
+        final stock = (data["stock"] as num?)?.toInt() ?? 0;
+        var clamped = false;
+        setState(() {
+          _availableStock = stock;
+          if (widget.isOnline && _checkoutDraft == null && stock > 0 && _quantity > stock) {
+            _quantity = stock;
+            clamped = true;
+          }
+        });
+        if (clamped) _persistCart();
       }
     } catch (_) {
       if (mounted) setState(() => _availableStock = null);
@@ -1413,6 +2061,7 @@ class _StoreScreenState extends State<StoreScreen> {
       _availableStock = null;
       _checkoutMessage = null;
     });
+    _persistCart();
     _loadInventory();
   }
 
@@ -1424,6 +2073,7 @@ class _StoreScreenState extends State<StoreScreen> {
       case "PAYMENT_CAPTURE_FAILED": return "Payment could not be completed. No order was placed; please retry.";
       case "DUPLICATE_ORDER_ID": return "This order reference was used with different details. Start a new order.";
       case "VARIANT_NOT_FOUND": return "This product option is unavailable. Refresh the store and try again.";
+      case "VALIDATION_ERROR": return "Please check your order details and items.";
       default: return "We could not place this order. Review the details and try again.";
     }
   }
@@ -1527,9 +2177,11 @@ class _StoreScreenState extends State<StoreScreen> {
     setState(() { _processing = true; _checkoutMessage = null; });
     final draft = _checkoutDraft ?? <String, dynamic>{
       "order_id": "ord-${DateTime.now().microsecondsSinceEpoch}",
-      "customer_id": ApiService.currentEmail.isEmpty ? "cust-mobile-01" : ApiService.currentEmail,
-      "items": [{"variant_id": _selectedVariant, "quantity": 1}],
-      "discount_code": _discountCtrl.text.trim().isEmpty ? null : _discountCtrl.text.trim(),
+      "customer_id": ApiService.currentUserId.isNotEmpty
+          ? ApiService.currentUserId
+          : (ApiService.currentEmail.isNotEmpty ? ApiService.currentEmail : "cust-mobile-01"),
+      "items": [{"variant_id": _selectedVariant, "quantity": _quantity}],
+      "discount_code": _discountCtrl.text.trim().isEmpty ? null : _discountCtrl.text.trim().toUpperCase(),
       "payment": {"token": _paymentToken},
     };
     if (_checkoutDraft == null) {
@@ -1540,13 +2192,14 @@ class _StoreScreenState extends State<StoreScreen> {
     try {
       final response = await http.post(
         Uri.parse("${ApiService.baseUrl}/audit/v1/checkout"),
-        headers: const {"Content-Type": "application/json"},
+          headers: ApiService.authHeaders,
         body: jsonEncode(draft),
       ).timeout(const Duration(seconds: 14));
       final decoded = jsonDecode(response.body);
       final data = decoded is Map<String, dynamic> ? decoded : <String, dynamic>{};
       if (response.statusCode == 200 || response.statusCode == 201) {
         await ApiService.clearCheckoutDraft();
+        await ApiService.clearCheckoutCart();
         if (mounted) {
           setState(() {
           _lastReceipt = data["receipt"] is Map ? Map<String, dynamic>.from(data["receipt"]) : null;
@@ -1565,6 +2218,15 @@ class _StoreScreenState extends State<StoreScreen> {
       } else {
         final error = data["error"];
         final code = error is Map ? error["code"]?.toString() ?? "CHECKOUT_FAILED" : "CHECKOUT_FAILED";
+        if (response.statusCode >= 500 || response.statusCode == 429) {
+          if (mounted) {
+            setState(() {
+              _checkoutMessage = "The server is temporarily unavailable. The order reference is saved, so retrying will not create a second order.";
+              _messageIsError = true;
+            });
+          }
+          return;
+        }
         await ApiService.clearCheckoutDraft();
         if (mounted) {
           setState(() {
@@ -1572,6 +2234,7 @@ class _StoreScreenState extends State<StoreScreen> {
           _checkoutMessage = _checkoutError(code);
           _messageIsError = true;
         });
+          _persistCart();
         }
       }
     } on TimeoutException {
@@ -1673,11 +2336,28 @@ class _StoreScreenState extends State<StoreScreen> {
                   ChoiceChip(label: const Text("Large"), selected: _selectedVariant == "var-jersey-001-L",
                     onSelected: _checkoutDraft != null ? null : (_) => _selectVariant("var-jersey-001-L")),
                 ]),
+                const SizedBox(height: 12),
+                Row(children: [
+                  const Expanded(child: Text("Quantity", style: TextStyle(fontWeight: FontWeight.w700))),
+                  IconButton(
+                    tooltip: "Remove one",
+                    onPressed: _checkoutDraft != null || _quantity <= 1 ? null : () => _changeQuantity(-1),
+                    icon: const Icon(Icons.remove_circle_outline),
+                  ),
+                  Text("$_quantity", style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+                  IconButton(
+                    tooltip: "Add one",
+                    onPressed: _checkoutDraft != null || (_availableStock != null && _quantity >= _availableStock!)
+                        ? null
+                        : () => _changeQuantity(1),
+                    icon: const Icon(Icons.add_circle_outline),
+                  ),
+                ]),
                 const SizedBox(height: 14),
                 TextField(controller: _discountCtrl, enabled: _checkoutDraft == null,
                   textCapitalization: TextCapitalization.characters,
                   decoration: const InputDecoration(labelText: "Discount code (optional)", prefixIcon: Icon(Icons.local_offer_outlined)),
-                  onChanged: (_) => setState(() {})),
+                  onChanged: (_) { setState(() {}); _persistCart(); }),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
                   isExpanded: true,
@@ -1688,12 +2368,17 @@ class _StoreScreenState extends State<StoreScreen> {
                     DropdownMenuItem(value: "tok_declined", child: Text("Test payment · declined", overflow: TextOverflow.ellipsis)),
                     DropdownMenuItem(value: "tok_capture_fail", child: Text("Test payment · capture failure", overflow: TextOverflow.ellipsis)),
                   ],
-                  onChanged: _checkoutDraft != null ? null : (value) { if (value != null) setState(() => _paymentToken = value); },
+                  onChanged: _checkoutDraft != null ? null : (value) {
+                    if (value != null) {
+                      setState(() => _paymentToken = value);
+                      _persistCart();
+                    }
+                  },
                 ),
                 const SizedBox(height: 16),
                 Row(children: [
                   const Text("Estimated total", style: TextStyle(fontWeight: FontWeight.w600)), const Spacer(),
-                  Text(discounted ? "PKR 4,050" : "PKR 4,500",
+                  Text("PKR ${(_quantity * 4500 * (discounted ? 0.9 : 1)).toStringAsFixed(0)}",
                     style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF10284B))),
                 ]),
                 const SizedBox(height: 16),
@@ -1748,7 +2433,36 @@ class _RosterManagementScreenState extends State<RosterManagementScreen> {
   String _toSquad = "club-alpha-2";
   final TextEditingController _reasonCtrl = TextEditingController(text: "Tactical loan");
 
+  Future<void> _confirmRosterAction() async {
+    final actionLabel = switch (_actionType) {
+      "loan" => "Loan player",
+      "release" => "Release player",
+      _ => "Transfer player",
+    };
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text("Confirm $actionLabel"),
+        content: Text(
+          "${_selectedPlayer.replaceAll('-', ' ')} will be ${_actionType == 'loan' ? 'loaned to' : _actionType == 'release' ? 'released from' : 'moved to'} "
+          "${_actionType == 'release' ? 'the squad' : _toSquad.replaceAll('-', ' ')}.\n\n"
+          "Effective date: ${DateTime.now().toIso8601String().substring(0, 10)}\nReason: ${_reasonCtrl.text.trim().isEmpty ? 'Not provided' : _reasonCtrl.text.trim()}\n\n"
+          "The move will be recorded in the player audit history.",
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text("Review")),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text("Confirm move")),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) await _submitRosterAction();
+  }
+
   Future<void> _submitRosterAction() async {
+    if (_reasonCtrl.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Add a reason before submitting this roster change.")));
+      return;
+    }
     final actId = "a-${DateTime.now().microsecondsSinceEpoch}";
     final payload = {
       "request_id": "tr-$actId",
@@ -1760,14 +2474,14 @@ class _RosterManagementScreenState extends State<RosterManagementScreen> {
       "effective_date": DateTime.now().toIso8601String().substring(0, 10),
       "loan_end_date": _actionType == "loan" ? DateTime.now().add(const Duration(days: 90)).toIso8601String().substring(0, 10) : null,
       "reason": _reasonCtrl.text,
-      "requested_by": "manager@nascon.test"
+      "requested_by": ApiService.currentEmail
     };
 
     if (widget.isOnline) {
       try {
         final res = await http.post(
           Uri.parse("${ApiService.baseUrl}/audit/v1/roster/transfer"),
-          headers: {"Content-Type": "application/json"},
+          headers: ApiService.authHeaders,
           body: jsonEncode(payload),
         ).timeout(const Duration(seconds: 6));
         if (res.statusCode == 200 || res.statusCode == 201) {
@@ -1886,7 +2600,7 @@ class _RosterManagementScreenState extends State<RosterManagementScreen> {
                 backgroundColor: Colors.teal[800],
                 foregroundColor: Colors.white,
               ),
-              onPressed: _submitRosterAction,
+              onPressed: _confirmRosterAction,
               child: const Text("Submit Roster Move"),
             ),
           ],
@@ -1951,7 +2665,7 @@ class _ScoringEntryScreenState extends State<ScoringEntryScreen> {
       try {
         final res = await http.post(
           Uri.parse("${ApiService.baseUrl}/audit/v1/events"),
-          headers: {"Content-Type": "application/json"},
+          headers: ApiService.authHeaders,
           body: jsonEncode(payload),
         ).timeout(const Duration(seconds: 6));
         if (res.statusCode == 201 || res.statusCode == 200) {
@@ -2088,19 +2802,27 @@ class _ScoringEntryScreenState extends State<ScoringEntryScreen> {
 // ==========================================
 class AccountScreen extends StatelessWidget {
   final VoidCallback onRoleChanged;
+  final String tenantId;
+  final ValueChanged<String> onTenantChanged;
   final bool isOnline;
   final int pendingCount;
   final List<Map<String, dynamic>> pendingActions;
+  final List<Map<String, dynamic>> syncHistory;
   final VoidCallback onSync;
+  final VoidCallback onClearHistory;
   final Future<void> Function() onLogout;
 
   const AccountScreen({
     super.key,
     required this.onRoleChanged,
+    required this.tenantId,
+    required this.onTenantChanged,
     required this.isOnline,
     required this.pendingCount,
     required this.pendingActions,
+    required this.syncHistory,
     required this.onSync,
+    required this.onClearHistory,
     required this.onLogout,
   });
 
@@ -2111,32 +2833,44 @@ class AccountScreen extends StatelessWidget {
       );
       return;
     }
-    final passwordController = TextEditingController();
-    final password = await showDialog<String>(
+    String enteredPassword = "";
+    final confirmed = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text("Sign in as $email"),
-        content: TextField(
-          controller: passwordController,
-          autofocus: true,
-          obscureText: true,
-          decoration: const InputDecoration(labelText: "Password"),
-          onSubmitted: (value) => Navigator.pop(dialogContext, value),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text("Cancel")),
-          FilledButton(onPressed: () => Navigator.pop(dialogContext, passwordController.text), child: const Text("Sign in")),
-        ],
-      ),
+      builder: (dialogContext) {
+        final ctrl = TextEditingController();
+        return AlertDialog(
+          title: Text("Sign in as $email"),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: "Password"),
+            onChanged: (val) => enteredPassword = val,
+            onSubmitted: (val) {
+              enteredPassword = val;
+              Navigator.pop(dialogContext, true);
+            },
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text("Cancel")),
+            FilledButton(
+              onPressed: () {
+                enteredPassword = ctrl.text;
+                Navigator.pop(dialogContext, true);
+              },
+              child: const Text("Sign in"),
+            ),
+          ],
+        );
+      },
     );
-    passwordController.dispose();
-    if (password == null || !context.mounted) return;
+    if (confirmed != true || enteredPassword.isEmpty || !context.mounted) return;
     try {
-      await ApiService.login(email, password);
+      await ApiService.login(email, enteredPassword);
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      if (!context.mounted) return;
       onRoleChanged();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Signed in as $email")));
-      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Signed in as $email")));
     } on ApiException catch (error) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
@@ -2169,20 +2903,19 @@ class AccountScreen extends StatelessWidget {
         ],
       ),
     );
-    controller.dispose();
     if (entered == null || entered.isEmpty || !context.mounted) return;
     try {
       await ApiService.setServerUrl(entered);
       final reachable = await ApiService.checkHealth();
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      if (!context.mounted) return;
       onRoleChanged();
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(reachable
-              ? "Server is reachable at ${ApiService.baseUrl}"
-              : "Address saved, but ${ApiService.baseUrl} did not respond. Check that the API is running."),
-          backgroundColor: reachable ? const Color(0xFF08775E) : const Color(0xFF8A5A13),
-        ));
-      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(reachable
+            ? "Server is reachable at ${ApiService.baseUrl}"
+            : "Address saved, but ${ApiService.baseUrl} did not respond. Check that the API is running."),
+        backgroundColor: reachable ? const Color(0xFF08775E) : const Color(0xFF8A5A13),
+      ));
     } on FormatException catch (error) {
       if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
     } catch (_) {
@@ -2200,6 +2933,22 @@ class AccountScreen extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        if (ApiService.currentRole == "super_admin") ...[
+          Card(child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: DropdownButtonFormField<String>(
+              isExpanded: true,
+              initialValue: tenantId,
+              decoration: const InputDecoration(labelText: "Tenant workspace", prefixIcon: Icon(Icons.apartment_outlined)),
+              items: const [
+                DropdownMenuItem(value: "tenant-alpha", child: Text("Alpha League")),
+                DropdownMenuItem(value: "tenant-beta", child: Text("Beta League")),
+              ],
+              onChanged: (value) { if (value != null) onTenantChanged(value); },
+            ),
+          )),
+          const SizedBox(height: 12),
+        ],
         Container(
           padding: const EdgeInsets.all(18),
           decoration: BoxDecoration(
@@ -2277,7 +3026,7 @@ class AccountScreen extends StatelessWidget {
                   dense: true,
                   leading: const Icon(Icons.schedule_outlined, color: Color(0xFF8A5A13)),
                   title: Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
-                  subtitle: Text("${action['action_id'] ?? 'Action'} · waiting to sync"),
+                  subtitle: Text("${action['action_id'] ?? 'Action'} · queued ${action['queued_at'] ?? 'on this device'} · version ${action['base_version'] ?? 0}"),
                 );
               }),
               if (pendingActions.length > 5)
@@ -2289,6 +3038,33 @@ class AccountScreen extends StatelessWidget {
               label: const Text("Sync now"),
               onPressed: isOnline && pendingCount > 0 ? onSync : null,
             ),
+          ]),
+        )),
+        const SizedBox(height: 12),
+        Card(child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              const Icon(Icons.history, color: Color(0xFF1CA987)),
+              const SizedBox(width: 10),
+              const Expanded(child: Text("Recent sync history", style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800))),
+              if (syncHistory.isNotEmpty)
+                TextButton(onPressed: onClearHistory, child: const Text("Clear")),
+            ]),
+            if (syncHistory.isEmpty)
+              Text("Successful, duplicate, and rejected sync results will appear here.", style: TextStyle(color: Colors.blueGrey[600]))
+            else ...syncHistory.take(5).map((entry) {
+              final status = entry["status"]?.toString() ?? "unknown";
+              final errorCode = entry["error_code"]?.toString();
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                leading: Icon(status == "rejected" ? Icons.error_outline : Icons.check_circle_outline,
+                  color: status == "rejected" ? const Color(0xFF9E342C) : const Color(0xFF08775E)),
+                title: Text("${entry['action_id'] ?? 'Action'} · $status"),
+                subtitle: Text(errorCode == null ? "Synced ${entry['synced_at'] ?? ''}" : explainApiError(errorCode)),
+              );
+            }),
           ]),
         )),
         const SizedBox(height: 18),

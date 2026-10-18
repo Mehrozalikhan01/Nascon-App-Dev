@@ -26,11 +26,18 @@ class MainActivity : FlutterActivity() {
     private val secureChannel = "nascon.secure_storage"
     private val localChannel = "nascon.local_store"
     private val receiptChannel = "nascon.receipt"
+    private val deepLinkChannelName = "nascon.deep_links"
+    private var deepLinkChannel: MethodChannel? = null
     private lateinit var localStore: LocalStore
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         localStore = LocalStore(applicationContext)
+        deepLinkChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, deepLinkChannelName)
+        deepLinkChannel?.setMethodCallHandler { call, result ->
+            if (call.method == "initialLink") result.success(intent?.dataString)
+            else result.notImplemented()
+        }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, secureChannel)
             .setMethodCallHandler { call, result ->
@@ -106,6 +113,12 @@ class MainActivity : FlutterActivity() {
                     result.error("RECEIPT_SAVE_ERROR", "Could not save the receipt PDF", error.message)
                 }
             }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.dataString?.let { deepLinkChannel?.invokeMethod("onLink", it) }
     }
 
     private fun readEncryptedToken(): String? {

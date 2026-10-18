@@ -10,7 +10,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY . .
+RUN useradd --system --uid 10001 --create-home nascon
+COPY --chown=10001:10001 . .
+USER 10001:10001
 
 EXPOSE 8080
 

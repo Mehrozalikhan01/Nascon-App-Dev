@@ -74,6 +74,7 @@ class RosterService:
                 "position": pos,
                 "squad_id": sq_id,
                 "league_id": league_id,
+                "tenant_id": tenant_id,
                 "role": role,
                 "is_on_loan": False,
                 "parent_squad_id": None,
@@ -103,6 +104,51 @@ class RosterService:
             if player_id in self._players
         ]
         return profile
+
+    def get_player(self, player_id: str) -> Optional[Dict[str, Any]]:
+        player = self._players.get(player_id)
+        return dict(player) if player is not None else None
+
+    def update_player_profile(self, player_id: str, data: Dict[str, Any], updated_by: str) -> Dict[str, Any]:
+        player = self._players.get(player_id)
+        if player is None:
+            return {"error": "PLAYER_NOT_FOUND"}
+        if not isinstance(data, dict):
+            return {"error": "VALIDATION_ERROR", "fields": ["body"]}
+
+        name = data.get("name", player["name"])
+        position = data.get("position", player["position"])
+        if (not isinstance(name, str) or len(name.strip()) < 2 or len(name.strip()) > 80 or
+                not isinstance(position, str) or position not in ("gk", "df", "mf", "fw")):
+            fields = []
+            if not isinstance(name, str) or len(name.strip()) < 2 or len(name.strip()) > 80:
+                fields.append("name")
+            if not isinstance(position, str) or position not in ("gk", "df", "mf", "fw"):
+                fields.append("position")
+            return {"error": "VALIDATION_ERROR", "fields": fields}
+
+        changes = {}
+        if name.strip() != player["name"]:
+            changes["name"] = {"from": player["name"], "to": name.strip()}
+            player["name"] = name.strip()
+        if position != player["position"]:
+            changes["position"] = {"from": player["position"], "to": position}
+            player["position"] = position
+        if changes:
+            self._audit_seq += 1
+            self._player_history.setdefault(player_id, []).append({
+                "audit_id": f"au-{self._audit_seq:04d}",
+                "action": "profile_update",
+                "player_id": player_id,
+                "league_id": player["league_id"],
+                "effective_date": date.today().isoformat(),
+                "state": "active",
+                "who": updated_by,
+                "when": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "why": "Player profile updated",
+                "changes": changes,
+            })
+        return {"player": dict(player), "changes": changes}
 
     def transfer_player(self, data: Dict[str, Any]) -> Dict[str, Any]:
         req_id = data.get("request_id")

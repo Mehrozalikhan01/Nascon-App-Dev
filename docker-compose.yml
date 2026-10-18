@@ -6,7 +6,9 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-nascon_league}
       POSTGRES_USER: ${POSTGRES_USER:-nascon}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nascon_secure_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-${DAY1_SALT:?DAY1_SALT must be set before starting the API}}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 3s
@@ -18,12 +20,35 @@ services:
     image: redis:7-alpine
     container_name: nascon_redis
     restart: always
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
       timeout: 3s
       retries: 10
       start_period: 2s
+    volumes:
+      - redis_data:/data
+
+  minio:
+    image: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z
+    container_name: nascon_minio
+    restart: always
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-nascon-local}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-${DAY1_SALT:?DAY1_SALT must be set before starting MinIO}}
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${MINIO_PORT:-9000}:9000"
+      - "${BIND_ADDRESS:-0.0.0.0}:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "minio", "--version"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
 
   api:
     build:
@@ -32,20 +57,137 @@ services:
     container_name: nascon_api
     restart: always
     ports:
-      - "8080:8080"
+      - "${BIND_ADDRESS:-0.0.0.0}:${PORT:-8080}:8080"
     environment:
       DAY1_SALT: ${DAY1_SALT:?DAY1_SALT must be set before starting the API}
+      DAY2_SALT: ${DAY2_SALT:?DAY2_SALT must be set before starting the API}
       JWT_SECRET: ${JWT_SECRET:-}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://nascon:nascon_secure_password@postgres:5432/nascon_league}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-nascon}:${POSTGRES_PASSWORD:-${DAY1_SALT:?DAY1_SALT must be set before starting the API}}@postgres:5432/${POSTGRES_DB:-nascon_league}}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-nascon-local}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-${DAY1_SALT:?DAY1_SALT must be set before starting MinIO}}
+      MINIO_BUCKET: ${MINIO_BUCKET:-nascon-receipts}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      MEDIAMTX_API_ENDPOINT: http://mediamtx:9997
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://127.0.0.1}
       CORS_ORIGIN_REGEX: ${CORS_ORIGIN_REGEX:-^https?://(localhost|127\.0\.0\.1)(:\d+)?$}
       PORT: ${PORT:-8080}
       HOST: ${HOST:-0.0.0.0}
-    volumes:
-      - ./backend:/app
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nascon_worker
+    restart: always
+    command: ["python", "-m", "app.worker"]
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-nascon-local}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-${DAY1_SALT:?DAY1_SALT must be set before starting MinIO}}
+      MINIO_BUCKET: ${MINIO_BUCKET:-nascon-receipts}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    volumes:
+      - media_recordings:/recordings:ro
+
+  mediamtx:
+    build:
+      context: .
+      dockerfile: media/Dockerfile
+    container_name: nascon_mediamtx
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:1935:1935"
+      - "${BIND_ADDRESS:-0.0.0.0}:8888:8888"
+      - "${BIND_ADDRESS:-0.0.0.0}:8889:8889"
+      - "${BIND_ADDRESS:-0.0.0.0}:8189:8189/udp"
+    volumes:
+      - media_recordings:/recordings
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9997/v3/config/global/get"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 3s
+
+  selenium-hub:
+    image: selenium/hub:4.25.0
+    container_name: nascon-selenium-hub
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:4444:4444"
+      - "${BIND_ADDRESS:-0.0.0.0}:4442:4442"
+      - "${BIND_ADDRESS:-0.0.0.0}:4443:4443"
+
+  node-chrome-1:
+    image: selenium/node-chrome:4.25.0
+    container_name: nascon-node-chrome-1
+    restart: unless-stopped
+    shm_size: "1gb"
+    depends_on: [selenium-hub]
+    environment:
+      SE_EVENT_BUS_HOST: selenium-hub
+      SE_EVENT_BUS_PUBLISH_PORT: 4442
+      SE_EVENT_BUS_SUBSCRIBE_PORT: 4443
+      SE_NODE_MAX_SESSIONS: 2
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
+      SE_START_VNC: "false"
+      SE_NODE_SESSION_TIMEOUT: 90
+
+  node-chrome-2:
+    image: selenium/node-chrome:4.25.0
+    container_name: nascon-node-chrome-2
+    restart: unless-stopped
+    shm_size: "1gb"
+    depends_on: [selenium-hub]
+    environment:
+      SE_EVENT_BUS_HOST: selenium-hub
+      SE_EVENT_BUS_PUBLISH_PORT: 4442
+      SE_EVENT_BUS_SUBSCRIBE_PORT: 4443
+      SE_NODE_MAX_SESSIONS: 2
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
+      SE_START_VNC: "false"
+      SE_NODE_SESSION_TIMEOUT: 90
+
+  node-firefox:
+    image: selenium/node-firefox:4.25.0
+    container_name: nascon-node-firefox
+    restart: unless-stopped
+    shm_size: "1gb"
+    depends_on: [selenium-hub]
+    environment:
+      SE_EVENT_BUS_HOST: selenium-hub
+      SE_EVENT_BUS_PUBLISH_PORT: 4442
+      SE_EVENT_BUS_SUBSCRIBE_PORT: 4443
+      SE_NODE_MAX_SESSIONS: 2
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
+      SE_START_VNC: "false"
+      SE_NODE_SESSION_TIMEOUT: 90
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  media_recordings:

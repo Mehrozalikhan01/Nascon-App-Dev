@@ -17,6 +17,9 @@ class StandingsService:
     def get_league(self, league_id: str) -> Optional[Dict[str, Any]]:
         return self._leagues.get(league_id)
 
+    def get_league_ids(self) -> List[str]:
+        return sorted(self._leagues)
+
     def register_league(self, data: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(data, dict):
             return {"error": "VALIDATION_ERROR", "fields": ["body"]}
