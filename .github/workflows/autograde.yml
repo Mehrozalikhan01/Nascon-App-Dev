@@ -1,0 +1,90 @@
+name: NaSCon Autograde & CI Verification
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify Phase I Ancestry
+        run: |
+          if [ -n "${{ secrets.DAY1_BASE_SHA }}" ]; then
+            git merge-base --is-ancestor "${{ secrets.DAY1_BASE_SHA }}" HEAD || {
+              echo "Error: Branch does not descend from DAY1_BASE_SHA"
+              exit 1
+            }
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Test Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements.txt
+          pip install -r backend/requirements.txt pytest-cov
+
+      - name: Set up k6
+        run: |
+          curl https://github.com/grafana/k6/releases/download/v0.50.0/k6-v0.50.0-linux-amd64.tar.gz -L | tar xvz --strip-components 1
+          sudo mv k6 /usr/local/bin/
+
+      - name: Start Docker Stack
+        env:
+          DAY1_SALT: ${{ secrets.DAY1_SALT || 'T15D1b255e2e8e2e' }}
+          DAY2_SALT: ${{ secrets.DAY2_SALT || 'T37D28479ba0a5bc' }}
+        run: |
+          docker compose up -d --build
+          echo "Waiting for core services and Selenium Grid to be healthy..."
+          for i in $(seq 1 60); do
+            if curl -s http://localhost:8080/health | grep -q '"status":"ok"' && \
+               curl -s http://localhost:4444/status | grep -q '"ready":true'; then
+              echo "Stack is healthy!"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Verify Selenium Grid 4 Nodes
+        run: |
+          NODE_COUNT=$(curl -s http://localhost:4444/status | grep -o '"id":' | wc -l)
+          echo "Active nodes: $NODE_COUNT"
+          curl -s http://localhost:4444/status
+
+      - name: Run Backend Contract & Unit Tests
+        env:
+          DAY1_SALT: ${{ secrets.DAY1_SALT || 'T15D1b255e2e8e2e' }}
+          DAY2_SALT: ${{ secrets.DAY2_SALT || 'T37D28479ba0a5bc' }}
+        run: |
+          PYTHONPATH=backend pytest tests/test_day2.py tests/test_day2_helpers.py tests/test_all_endpoints.py tests/test_regressions.py -v
+
+      - name: Run Selenium Grid Tests
+        run: |
+          mkdir -p tests/reports
+          pytest tests/selenium/test_guest_grid.py --junitxml=tests/reports/selenium-report.xml -v
+
+      - name: Run k6 Concurrency Smoke Load
+        run: |
+          k6 run --summary-export=tests/reports/k6-summary.json tests/k6_load.js
+
+      - name: Verify Deliverables Present
+        run: |
+          test -f COVERAGE_DAY2.json || { echo "Missing COVERAGE_DAY2.json"; exit 1; }
+          test -f TRACEABILITY.md || { echo "Missing TRACEABILITY.md"; exit 1; }
+          test -f tests/reports/selenium-report.xml || { echo "Missing selenium-report.xml"; exit 1; }
+          test -f tests/reports/k6-summary.json || { echo "Missing k6-summary.json"; exit 1; }
+          echo "All deliverable files verified!"
