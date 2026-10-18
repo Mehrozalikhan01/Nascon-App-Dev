@@ -339,13 +339,13 @@ def get_costream_session(session_id: str):
 
 
 @router.get("/audit/v1/qr/{entity_id}")
-def qr_metadata(entity_id: str, request: Request, inspect: bool = False):
+async def qr_metadata(entity_id: str, request: Request, inspect: bool = False):
     if inspect:
         entity = _qr_entities.get(entity_id)
         if entity:
             cached = entity.get("_cached_inspect")
             if cached is not None:
-                return cached
+                return Response(content=cached, media_type="application/json")
     with _lock:
         entity = _ensure_qr(entity_id)
         if entity is None:
@@ -353,10 +353,11 @@ def qr_metadata(entity_id: str, request: Request, inspect: bool = False):
         if inspect:
             cached = entity.get("_cached_inspect")
             if cached is not None:
-                return cached
+                return Response(content=cached, media_type="application/json")
             result = _qr_metadata(request, entity_id, entity)
-            entity["_cached_inspect"] = result
-            return result
+            cached = json.dumps(result, separators=(",", ":")).encode("utf-8")
+            entity["_cached_inspect"] = cached
+            return Response(content=cached, media_type="application/json")
         entity["scan_count"] += 1
         entity.pop("_cached_inspect", None)
         return _qr_metadata(request, entity_id, entity)
@@ -506,14 +507,14 @@ def _moderate(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/audit/v1/moderation/test")
-def moderation_probe(body: Any = Body(None)):
+async def moderation_probe(body: Any = Body(None)):
     if not isinstance(body, dict):
         return _error("VALIDATION_ERROR", "Request body must be an object", 400, {"fields": ["body"]})
     response = _moderate(body)
     if "_error" in response:
         _, fields = response["_error"]
         return _error("VALIDATION_ERROR", "Invalid moderation probe", 400, {"fields": fields})
-    return response
+    return Response(content=json.dumps(response, separators=(",", ":")).encode("utf-8"), media_type="application/json")
 
 
 @router.post("/audit/v1/guest/cart-merge")

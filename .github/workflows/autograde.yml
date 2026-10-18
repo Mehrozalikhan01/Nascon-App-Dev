@@ -63,6 +63,7 @@ jobs:
         run: |
           NODE_COUNT=$(curl -s http://localhost:4444/status | grep -o '"id":' | wc -l)
           echo "Active nodes: $NODE_COUNT"
+          [ "$NODE_COUNT" -ge 3 ] || { echo "Error: Fewer than 3 Selenium nodes ready"; exit 1; }
           curl -s http://localhost:4444/status
 
       - name: Run Backend Contract & Unit Tests
@@ -75,7 +76,7 @@ jobs:
       - name: Run Selenium Grid Tests
         run: |
           mkdir -p tests/reports
-          pytest tests/selenium/test_guest_grid.py --junitxml=tests/reports/selenium-report.xml -v
+          pytest -n 3 tests/selenium/test_guest_grid.py --junitxml=tests/reports/selenium-report.xml -v
 
       - name: Run k6 Concurrency Smoke Load
         run: |

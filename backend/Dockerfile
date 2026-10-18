@@ -16,4 +16,4 @@ USER 10001:10001
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "uvicorn app.main:app --host \"${HOST:-0.0.0.0}\" --port \"${PORT:-8080}\""]
+CMD ["sh", "-c", "uvicorn app.main:app --host \"${HOST:-0.0.0.0}\" --port \"${PORT:-8080}\" --no-access-log --limit-concurrency 1000 --backlog 2048"]
