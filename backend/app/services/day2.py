@@ -21,7 +21,7 @@ import time
 from collections import defaultdict, deque
 from typing import Any
 
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 
 from app.core.config import settings
@@ -339,7 +339,13 @@ def get_costream_session(session_id: str):
 
 
 @router.get("/audit/v1/qr/{entity_id}")
-async def qr_metadata(entity_id: str, request: Request, inspect: bool = False):
+def qr_metadata(entity_id: str, request: Request, inspect: bool = False):
+    if inspect:
+        entity = _qr_entities.get(entity_id)
+        if entity:
+            cached = entity.get("_cached_inspect")
+            if cached is not None:
+                return cached
     with _lock:
         entity = _ensure_qr(entity_id)
         if entity is None:
@@ -451,6 +457,9 @@ def _moderate(body: dict[str, Any]) -> dict[str, Any]:
     if fields:
         return {"_error": ("VALIDATION_ERROR", fields)}
     fingerprint = hashlib.sha256(_canonical(body).encode("utf-8")).hexdigest()
+    replay = _moderation_replays.get(fingerprint)
+    if replay:
+        return dict(replay)
     with _lock:
         replay = _moderation_replays.get(fingerprint)
         if replay:
@@ -497,11 +506,7 @@ def _moderate(body: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/audit/v1/moderation/test")
-async def moderation_probe(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        return _error("VALIDATION_ERROR", "Malformed JSON", 400, {"fields": ["body"]})
+def moderation_probe(body: Any = Body(None)):
     if not isinstance(body, dict):
         return _error("VALIDATION_ERROR", "Request body must be an object", 400, {"fields": ["body"]})
     response = _moderate(body)
