@@ -24,7 +24,8 @@ export function viewStream() {
     'guest QR status is 200': (r) => r.status === 200,
     'QR has target_route': (r) => r.json('target_route') !== undefined,
   });
-  sleep(0.1);
+  // Keep the full viewer population active without tight-polling each session.
+  sleep(0.5);
 }
 
 export function postChat() {
@@ -41,5 +42,6 @@ export function postChat() {
     headers: { 'Content-Type': 'application/json' },
   });
   check(response, { 'moderation probe status is 200': (r) => r.status === 200 });
-  sleep(0.1);
+  // Model a short human posting interval while all 50 poster VUs remain active.
+  sleep(0.5);
 }

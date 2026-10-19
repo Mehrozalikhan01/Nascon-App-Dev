@@ -60,10 +60,7 @@ class ApiService {
   static Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString("server_url");
-    var candidate = saved ?? defaultBaseUrl;
-    if (candidate.contains("10.0.2.2")) {
-      candidate = defaultBaseUrl;
-    }
+    final candidate = saved ?? defaultBaseUrl;
     try {
       baseUrl = _normalizeServerUrl(candidate);
     } on FormatException {

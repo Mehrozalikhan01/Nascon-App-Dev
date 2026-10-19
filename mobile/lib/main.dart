@@ -539,7 +539,7 @@ class _LoginScreenState extends State<LoginScreen> {
               decoration: const InputDecoration(
                 labelText: "Server address",
                 hintText: "http://localhost:8080",
-                helperText: "Format: http://<ip-or-host>:8080",
+                helperText: "Physical phone: use your computer's LAN IP. Emulator: use 10.0.2.2. Both need port 8080.",
               ),
             ),
             const SizedBox(height: 12),

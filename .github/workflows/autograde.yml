@@ -49,43 +49,183 @@ jobs:
           DAY2_SALT: ${{ secrets.DAY2_SALT || 'T37D28479ba0a5bc' }}
         run: |
           docker compose up -d --build
-          echo "Waiting for core services and Selenium Grid to be healthy..."
+          echo "Waiting up to 120 seconds for all 10 containers to become healthy..."
           for i in $(seq 1 60); do
-            if curl -s http://localhost:8080/health | grep -q '"status":"ok"' && \
-               curl -s http://localhost:4444/status | grep -q '"ready":true'; then
-              echo "Stack is healthy!"
+            HEALTHY=$(docker compose ps --format '{{.Service}}|{{.State}}|{{.Health}}' | awk -F'|' '$2 == "running" && $3 == "healthy" { count++ } END { print count + 0 }')
+            if [ "$HEALTHY" -eq 10 ]; then
+              echo "All 10 containers are healthy."
               break
+            fi
+            if [ "$i" -eq 60 ]; then
+              docker compose ps
+              docker compose logs --no-color --tail=80
+              echo "Timed out waiting for all 10 containers to become healthy."
+              exit 1
             fi
             sleep 2
           done
 
       - name: Verify Selenium Grid 4 Nodes
         run: |
-          NODE_COUNT=$(curl -s http://localhost:4444/status | grep -o '"id":' | wc -l)
-          echo "Active nodes: $NODE_COUNT"
+          NODE_COUNT=$(curl -fsS http://localhost:4444/status | python -c 'import json,sys; data=json.load(sys.stdin); print(sum(node.get("availability") == "UP" for node in data.get("value", {}).get("nodes", [])))')
+          echo "Active Selenium nodes: $NODE_COUNT"
           [ "$NODE_COUNT" -ge 3 ] || { echo "Error: Fewer than 3 Selenium nodes ready"; exit 1; }
-          curl -s http://localhost:4444/status
+          curl -fsS http://localhost:4444/status
 
       - name: Run Backend Contract & Unit Tests
         env:
           DAY1_SALT: ${{ secrets.DAY1_SALT || 'T15D1b255e2e8e2e' }}
           DAY2_SALT: ${{ secrets.DAY2_SALT || 'T37D28479ba0a5bc' }}
         run: |
-          PYTHONPATH=backend pytest tests/test_day2.py tests/test_day2_helpers.py tests/test_all_endpoints.py tests/test_regressions.py -v
+          PYTHONPATH=backend pytest tests/test_day2.py tests/test_day2_edge_cases.py tests/test_day2_helpers.py tests/test_all_endpoints.py tests/test_regressions.py -v \
+            --cov=app.services.day2 \
+            --cov=app.services.streaming \
+            --cov=app.services.costream \
+            --cov=app.services.qr_guest \
+            --cov=app.services.moderation_dlq \
+            --cov=app.services.observability \
+            --cov-report=json:/tmp/nascon-day2-coverage.json
+          python tests/verify_day2_coverage.py /tmp/nascon-day2-coverage.json COVERAGE_DAY2.json
 
       - name: Run Selenium Grid Tests
         run: |
           mkdir -p tests/reports
-          pytest -n 3 tests/selenium/test_guest_grid.py --junitxml=tests/reports/selenium-report.xml -v
+          SELENIUM_BROWSER=chrome pytest -n 3 tests/selenium/test_guest_grid.py --junitxml=tests/reports/selenium-chrome-report.xml -v
+          SELENIUM_BROWSER=firefox pytest -n 3 tests/selenium/test_guest_grid.py --junitxml=tests/reports/selenium-firefox-report.xml -v
+
+      - name: Free capacity for the isolated load run
+        run: |
+          docker compose stop worker mediamtx node-chrome-1 node-chrome-2 node-firefox selenium-hub postgres redis minio
 
       - name: Run k6 Concurrency Smoke Load
         run: |
+          set +e
           k6 run --summary-export=tests/reports/k6-summary.json tests/k6_load.js
+          K6_EXIT=$?
+          set -e
+          python tests/verify_k6_summary.py tests/reports/k6-summary.json
+          [ "$K6_EXIT" -eq 0 ]
 
       - name: Verify Deliverables Present
         run: |
           test -f COVERAGE_DAY2.json || { echo "Missing COVERAGE_DAY2.json"; exit 1; }
           test -f TRACEABILITY.md || { echo "Missing TRACEABILITY.md"; exit 1; }
-          test -f tests/reports/selenium-report.xml || { echo "Missing selenium-report.xml"; exit 1; }
+          test -f tests/reports/selenium-chrome-report.xml || { echo "Missing selenium-chrome-report.xml"; exit 1; }
+          test -f tests/reports/selenium-firefox-report.xml || { echo "Missing selenium-firefox-report.xml"; exit 1; }
           test -f tests/reports/k6-summary.json || { echo "Missing k6-summary.json"; exit 1; }
           echo "All deliverable files verified!"
+
+  appium-mobile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DAY1_SALT: ${{ secrets.DAY1_SALT || 'T15D1b255e2e8e2e' }}
+      DAY2_SALT: ${{ secrets.DAY2_SALT || 'T37D28479ba0a5bc' }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Set up Node.js and Appium
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Appium and test dependencies
+        run: |
+          npm install --global appium@2
+          appium driver install uiautomator2
+          python -m pip install -r tests/requirements.txt
+
+      - name: Detect Android hardware acceleration
+        id: android-kvm
+        shell: bash
+        run: |
+          if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] && grep -Eq '(^| )((vmx)|(svm))( |$)' /proc/cpuinfo; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "KVM is available; the emulator integration test will run."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "KVM is unavailable; the job will run the headless Android contract fallback."
+          fi
+
+      - name: Start application and Selenium services
+        if: steps.android-kvm.outputs.available == 'true'
+        run: |
+          docker compose up -d --build
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/health | grep -q '"status":"ok"' && \
+               curl -fsS http://localhost:4444/status | grep -q '"ready":true'; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS -X POST http://localhost:8080/audit/v1/reset \
+            -H 'Content-Type: application/json' -d '{"seed":42}'
+
+      - name: Build Android debug APK
+        working-directory: mobile
+        run: |
+          flutter pub get
+          flutter test
+          flutter build apk --debug
+
+      - name: Verify Android deep-link contract (headless-safe)
+        run: |
+          mkdir -p tests/reports
+          python -m pytest tests/appium/test_mobile_contract.py \
+            --junitxml=tests/reports/appium-report.xml -v
+
+      - name: Verify Appium server and UiAutomator2 installation (headless fallback)
+        if: steps.android-kvm.outputs.available != 'true'
+        run: |
+          appium --version
+          appium driver list --installed
+
+      - name: Run Appium deep-link tests on Android emulator
+        if: steps.android-kvm.outputs.available == 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            mkdir -p tests/reports
+            adb install mobile/build/app/outputs/flutter-apk/app-debug.apk
+            appium --address 127.0.0.1 --port 4723 > /tmp/appium.log 2>&1 &
+            APPIUM_READY=false
+            for i in $(seq 1 60); do
+              if curl -fsS http://127.0.0.1:4723/status | grep -q '"ready":true'; then APPIUM_READY=true; break; fi
+              sleep 2
+            done
+            if [ "$APPIUM_READY" != true ]; then cat /tmp/appium.log; exit 1; fi
+            APPIUM_SERVER_URL=http://127.0.0.1:4723 \
+            API_BASE_URL=http://127.0.0.1:8080 \
+            SELENIUM_REMOTE_URL=http://127.0.0.1:4444 \
+            SELENIUM_APP_BASE_URL=http://api:8080 \
+            pytest tests/appium/test_mobile_deeplink.py \
+              --junitxml=tests/reports/appium-report.xml -v
+
+      - name: Upload Appium report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appium-mobile-report
+          path: tests/reports/appium-report.xml

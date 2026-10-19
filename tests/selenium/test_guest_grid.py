@@ -16,6 +16,14 @@ APP_URL = os.getenv("SELENIUM_APP_BASE_URL", "http://api:8080")
 API_URL = os.getenv("API_BASE_URL", "http://localhost:8080")
 
 
+@pytest.fixture(scope="module", autouse=True)
+def reset_grid_state():
+    try:
+        httpx.post(f"{API_URL}/audit/v1/reset", timeout=5)
+    except Exception:
+        pass
+
+
 @pytest.fixture
 def driver():
     capabilities = {"browserName": os.getenv("SELENIUM_BROWSER", "chrome")}

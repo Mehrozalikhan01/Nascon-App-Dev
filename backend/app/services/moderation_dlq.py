@@ -18,10 +18,17 @@ def _token_pattern(word: str) -> str:
     return r"[_\W*.-]*".join(pieces)
 
 
+_PROFANITY_PATTERNS = tuple(
+    re.compile(_token_pattern(word), re.IGNORECASE) for word in _PROFANITY
+)
+_REPEATED_CHARACTER_PATTERN = re.compile(r"(.)\1{3,}", re.IGNORECASE)
+_PUNCTUATION_FLOOD_PATTERN = re.compile(r"[!?]{3,}")
+
+
 def mask_profanity(text: str) -> tuple[str, bool]:
     matches = []
-    for word in _PROFANITY:
-        matches.extend((match.start(), match.end()) for match in re.finditer(_token_pattern(word), text, re.IGNORECASE))
+    for pattern in _PROFANITY_PATTERNS:
+        matches.extend((match.start(), match.end()) for match in pattern.finditer(text))
     if not matches:
         return text, False
     matches.sort()
@@ -37,4 +44,7 @@ def mask_profanity(text: str) -> tuple[str, bool]:
 
 
 def is_flood_message(text: str) -> bool:
-    return bool(re.search(r"(.)\1{3,}", text, re.IGNORECASE) or re.search(r"[!?]{3,}", text))
+    return bool(
+        _REPEATED_CHARACTER_PATTERN.search(text)
+        or _PUNCTUATION_FLOOD_PATTERN.search(text)
+    )

@@ -1,7 +1,8 @@
 {
+  "day2_routes": 94.99,
   "streaming": 100.0,
   "costream": 100.0,
   "qr_guest": 100.0,
-  "moderation_dlq": 96.0,
+  "moderation_dlq": 96.77,
   "observability": 100.0
 }

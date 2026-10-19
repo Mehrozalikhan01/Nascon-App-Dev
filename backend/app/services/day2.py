@@ -19,6 +19,7 @@ import secrets
 import threading
 import time
 from collections import defaultdict, deque
+from functools import lru_cache
 from typing import Any
 
 from fastapi import APIRouter, Body, Request, WebSocket, WebSocketDisconnect
@@ -36,6 +37,8 @@ from app.services.streaming import create_stream_key, ingest_endpoints, media_pu
 
 router = APIRouter()
 _lock = threading.RLock()
+_moderation_lock = threading.RLock()
+_dlq_lock = threading.RLock()
 _stream_by_player: dict[str, dict[str, Any]] = {}
 _stream_by_key: dict[str, dict[str, Any]] = {}
 _sessions: dict[str, dict[str, Any]] = {}
@@ -67,7 +70,7 @@ def _sign(entity_id: str, payload: dict[str, Any]) -> str:
 def reset_day2() -> None:
     """Reset Day 2 state and install the required deterministic baseline."""
     global _ws_count
-    with _lock:
+    with _lock, _moderation_lock:
         _stream_by_player.clear()
         _stream_by_key.clear()
         _sessions.clear()
@@ -76,7 +79,8 @@ def reset_day2() -> None:
         _guest_tokens.clear()
         _guest_merges.clear()
         _carts.clear()
-        _dlq.clear()
+        with _dlq_lock:
+            _dlq.clear()
         _moderation_replays.clear()
         _moderation_times.clear()
         _chat_messages.clear()
@@ -139,9 +143,21 @@ def _match_target(entity_id: str, status: str) -> str:
 
 def update_match_state(match_id: str, status: str) -> None:
     """Synchronize a match QR route with the event-sourced score state."""
-    entity = _qr_entities.get(match_id)
-    if entity and status in {"upcoming", "in_progress", "completed", "postponed", "cancelled", "abandoned"}:
-        entity["status"] = status
+    if match_id == "match-m1" and status not in {"postponed", "cancelled", "abandoned"}:
+        from app.services.scoring import scoring_service
+
+        projection = scoring_service.project_match(match_id)
+        if projection:
+            status = projection.get("status", status)
+    if status not in {"upcoming", "in_progress", "completed", "postponed", "cancelled", "abandoned"}:
+        return
+    with _lock:
+        entity = _qr_entities.get(match_id)
+        if entity and entity.get("status") != status:
+            entity["status"] = status
+            # The cached inspection includes a signed target route. Refresh it
+            # whenever the event-sourced match state changes.
+            entity.pop("_cached_inspect", None)
 
 
 def _url(request: Request, path: str) -> str:
@@ -431,7 +447,8 @@ def resolve_short_qr(short_code: str):
 
 def _queue_dlq(room: str, count: int) -> None:
     events = [{"event_id": f"dlq-{secrets.token_hex(8)}", "chat_room_id": room, "type": "notification.delivery_failed", "attempts": 3} for _ in range(count)]
-    _dlq.extend(events)
+    with _dlq_lock:
+        _dlq.extend(events)
     if settings.REDIS_URL:
         try:
             import redis
@@ -443,6 +460,26 @@ def _queue_dlq(room: str, count: int) -> None:
             # In-memory queue still provides a usable local probe; Compose's
             # Redis health check makes the normal deployment durable.
             pass
+
+
+def _evaluate_moderation_text(text: str) -> tuple[bool, str, bool]:
+    flooded = is_flood_message(text)
+    if flooded:
+        return True, text, False
+    masked, profanity = mask_profanity(text)
+    return False, masked, profanity
+
+
+@lru_cache(maxsize=512)
+def _cached_moderation_text(text: str) -> tuple[bool, str, bool]:
+    return _evaluate_moderation_text(text)
+
+
+def _moderation_text_result(text: str) -> tuple[bool, str, bool]:
+    # Bound retained user input size as well as cache entry count.
+    if len(text) > 512:
+        return _evaluate_moderation_text(text)
+    return _cached_moderation_text(text)
 
 
 def _moderate(body: dict[str, Any]) -> dict[str, Any]:
@@ -458,10 +495,7 @@ def _moderate(body: dict[str, Any]) -> dict[str, Any]:
     if fields:
         return {"_error": ("VALIDATION_ERROR", fields)}
     fingerprint = hashlib.sha256(_canonical(body).encode("utf-8")).hexdigest()
-    replay = _moderation_replays.get(fingerprint)
-    if replay:
-        return dict(replay)
-    with _lock:
+    with _moderation_lock:
         replay = _moderation_replays.get(fingerprint)
         if replay:
             return dict(replay)
@@ -478,11 +512,11 @@ def _moderate(body: dict[str, Any]) -> dict[str, Any]:
                 if sender not in muted: muted.append(sender)
                 flagged_count += 1
                 continue
-            if is_flood_message(text):
+            flooded, masked, profanity = _moderation_text_result(text)
+            if flooded:
                 if sender not in muted: muted.append(sender)
                 flagged_count += 1
                 continue
-            masked, profanity = mask_profanity(text)
             if profanity:
                 if sender not in kicked: kicked.append(sender)
                 filtered.append({"message_id": item["message_id"], "sender": sender, "text": masked, "flagged": True, "reason": "profanity_leetspeak"})
@@ -491,8 +525,9 @@ def _moderate(body: dict[str, Any]) -> dict[str, Any]:
                 filtered.append({"message_id": item["message_id"], "sender": sender, "text": text, "flagged": False, "reason": None})
         if failed_count:
             _queue_dlq(room, failed_count)
-        queue_depth = len(_dlq)
-        undelivered = list(_dlq) if check_dlq else []
+        with _dlq_lock:
+            queue_depth = len(_dlq)
+            undelivered = list(_dlq) if check_dlq else []
         response = {
             "chat_room_id": room,
             "filtered_messages": filtered,
@@ -607,8 +642,9 @@ def metrics():
     with _lock:
         active_streams = sum(1 for item in _stream_by_player.values() if item["status"] == "active")
         qr_scans = sum(item["scan_count"] for item in _qr_entities.values())
-        dlq_depth = len(_dlq)
         connections = _ws_count
+    with _dlq_lock:
+        dlq_depth = len(_dlq)
     body = render_metrics(connections, active_streams, dlq_depth, qr_scans)
     return Response(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
@@ -732,7 +768,10 @@ async def post_chat(request: Request):
     sender = claims.get("sub", "member")
     if not isinstance(room, str) or not isinstance(text, str) or not text.strip():
         return _error("VALIDATION_ERROR", "chat_room_id and text are required", 400, {"fields": ["chat_room_id", "text"]})
-    result = _moderate({"chat_room_id": room, "incoming_messages": [{"message_id": message_id, "sender": sender, "text": text}], "check_dlq": False})
+    result = await asyncio.to_thread(
+        _moderate,
+        {"chat_room_id": room, "incoming_messages": [{"message_id": message_id, "sender": sender, "text": text}], "check_dlq": False},
+    )
     if result.get("muted_users") or not result.get("filtered_messages"):
         return _error("RATE_LIMITED", "Message blocked by moderation", 429)
     item = result["filtered_messages"][0]
@@ -777,6 +816,7 @@ def _member_id(request: Request) -> str | None:
     return str(claims.get("sub")) if claims else None
 
 
+@router.get("/api/v1/players/{player_id}/profile")
 @router.get("/api/v1/players/{player_id}")
 def public_player_profile(player_id: str):
     player = roster_service.get_player(player_id)

@@ -79,6 +79,33 @@ def test_qr_is_dynamic_private_on_inspection_and_exports_valid_bytes():
     assert client.get("/q/m1-live", follow_redirects=False).headers["location"].endswith("/web/matches/match-m1/vod")
 
 
+def test_qr_inspection_refreshes_signed_target_after_match_end():
+    reset()
+    before = client.get("/audit/v1/qr/match-m1?inspect=true").json()
+    assert before["target_route"] == "/web/matches/match-m1/live"
+
+    event = client.post("/audit/v1/events", json={
+        "event_id": "qr-match-end", "match_id": "match-m1",
+        "type": "match_end", "payload": {},
+    })
+    assert event.status_code == 201
+
+    after = client.get("/audit/v1/qr/match-m1?inspect=true").json()
+    assert after["short_url"] == before["short_url"]
+    assert after["target_route"] == "/web/matches/match-m1/vod"
+    assert after["signature"] != before["signature"]
+    assert after["signature"] == signed("match-m1", {
+        "entity_id": "match-m1", "short_url": after["short_url"],
+        "target_route": "/web/matches/match-m1/vod",
+    })
+
+    scan = client.get("/audit/v1/qr/match-m1").json()
+    assert scan["short_url"] == before["short_url"]
+    assert scan["target_route"] == "/web/matches/match-m1/vod"
+    redirect = client.get("/q/m1-live", follow_redirects=False)
+    assert redirect.headers["location"].endswith("/web/matches/match-m1/vod")
+
+
 def test_guest_cart_merge_is_atomic_and_idempotent():
     reset()
     body = {
@@ -144,6 +171,9 @@ def test_follow_unfollow_is_idempotent_and_profile_has_required_sections():
     assert second.json()["follower_count"] == 1
     profile = client.get("/api/v1/players/player-alpha-1").json()
     assert all(key in profile for key in ("career_match_events", "clubs", "upcoming_fixtures", "vod_archive"))
+    profile_alias = client.get("/api/v1/players/player-alpha-1/profile")
+    assert profile_alias.status_code == 200
+    assert profile_alias.json() == profile
     removed = client.delete("/api/v1/players/player-alpha-1/follow", headers=headers)
     assert removed.json()["follower_count"] == 0
 

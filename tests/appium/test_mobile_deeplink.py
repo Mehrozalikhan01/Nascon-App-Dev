@@ -18,6 +18,20 @@ APP_ACTIVITY = os.getenv("ANDROID_APP_ACTIVITY", ".MainActivity")
 @pytest.fixture(scope="module")
 def phone():
     try:
+        devices = subprocess.run(
+            ["adb", "devices", "-l"], capture_output=True, text=True,
+            check=False, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        pytest.skip(f"ADB is unavailable for a physical device or emulator: {error}")
+    attached = any(
+        len(fields := line.split()) >= 2 and fields[1] == "device"
+        for line in devices.stdout.splitlines()[1:]
+    )
+    if devices.returncode != 0 or not attached:
+        pytest.skip("No authorized Android device or emulator is attached to ADB")
+
+    try:
         status = requests.get(f"{APPIUM_URL}/status", timeout=2)
         ready = status.ok and status.json().get("value", {}).get("ready") is True
     except Exception:
